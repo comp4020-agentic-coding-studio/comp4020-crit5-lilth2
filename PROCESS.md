@@ -67,6 +67,50 @@ mechanic, not a lucky coincidence of timing.
    explanation.
    [`f41b86f`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/f41b86f)
 
+## Round two: matching the reference images, and what playtesting corrected
+
+The crit's next round of feedback pointed at three real screenshots of
+hypercasual "number gun runner" mobile games and asked for the core visual
+language — not the ad buttons, coins, or share-screen chrome those games also
+show — plus a faster pace. Concretely: a true 9:16 portrait frame instead of a
+wide landscape canvas; the player's body *is* a large 3D digit, not a block;
+digit bullets that read as paper-plane projectiles carrying a value; zones and
+walls as translucent glass gates with bold outlined labels; and a stacked
+cluster of digits behind the finish line. None of `game.ts`'s rules changed —
+only tunables (speed, spacing) and all of `main.ts`'s rendering did.
+[`bcc3fe4`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/bcc3fe4)
+[`2a4733d`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/2a4733d)
+
+**Pacing, before/after:** `BASE_SPEED` 0.32 → 0.42 track units/sec (+31%),
+`MAX_SPEED` 0.44 → 0.57 (+30%), and every `OBSTACLES` position plus
+`TRACK_LENGTH` scaled down by a uniform 0.85 (9.0 → 7.65 units) — same
+operation order and lanes, just closer together. A clean run now finishes in
+roughly 12–40s (`spec/game.test.ts`'s tightened pacing bound) instead of the
+prior 20–60s window.
+
+**What playtesting corrected:** driving the built site through Playwright at
+both marking viewports (as established last week) and actually looking at the
+win/loss frames — not just checking `status: "won"`/`"lost"` — caught two
+bugs the logic-level tests had no way to see:
+
+- `drawResultFlash`'s full-canvas tint peaked at alpha 0.32, which turned the
+  cyan sky and gray-purple road into a muddy sepia (win) or mauve (loss) wash
+  at the exact moment the payoff most needs to read clearly. Screenshots
+  before the fix look almost monochrome; the fix (alpha 0.16) keeps a visible
+  mood-tint without drowning the scene.
+- Two of the six decorative `FINISH_CLUSTER` digits (both "6"s) were
+  positioned close enough to stack directly on top of each other, reading as
+  a rendering glitch rather than the intended "cluster of digits" backdrop.
+  Rearranged into a back row of smaller/higher digits and a front row of
+  larger/lower ones so none overlap.
+
+Same lesson as last week's reflection, showing up in a new spot: the analytic
+level-driving script and the full `pnpm test` suite stayed green through both
+of these bugs, because neither one is a rule the game logic could violate —
+they're only visible in the rendered frame. The correction landed as its own
+commit, separate from the rendering pass that introduced it.
+[`2c862be`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/2c862be)
+
 ## Directing the AI collaboration
 
 I set the constraints this week (the player's identity must be the number
