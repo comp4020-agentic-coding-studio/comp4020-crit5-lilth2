@@ -3,16 +3,21 @@
 // state and turns keyboard/pointer input into the single "which lane do I
 // want to be in" intent the rules understand.
 import {
-  BULLET_BASE_VALUE,
+  BULLET_FIRE_INTERVAL,
   LANES,
+  MIN_FIRE_INTERVAL,
   OBSTACLES,
   TRACK_LENGTH,
   createInitialState,
+  isWallDestroyed,
   step,
+  type Bullet,
   type CanvasSize,
   type GameState,
   type Lane,
   type Obstacle,
+  type Wall,
+  type ZoneKind,
 } from "./game";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#game");
@@ -40,7 +45,21 @@ interface Particle {
 /** A transient color/scale reaction on the player's digit body, set whenever
  *  a zone or item changes playerValue, and decayed away in draw(). */
 interface PlayerFx {
-  kind: "gain" | "mult" | "loss";
+  kind: "gain" | "mult" | "loss" | "rate";
+  t: number;
+}
+
+/** A bullet's own operator kind, distinguished so a hit reads as one of four
+ *  specific things (grow-green, multiply-purple, shrink-red, divide-orange)
+ *  instead of a generic buff/debuff — matches the zone/gate palette below. */
+type BulletModKind = "add" | "mul" | "sub" | "div";
+
+/** One-shot flash on a bullet's own badge when a zone changes its value —
+ *  keyed by Bullet.id so it survives across frames until it decays, keyed
+ *  by identity rather than array position (bullets are added/removed every
+ *  frame). */
+interface BulletFx {
+  kind: BulletModKind;
   t: number;
 }
 
@@ -69,6 +88,16 @@ function shade(hex: string, amt: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
+/** Linear-interpolates between two "#rrggbb" colors — used to drain the lost
+ *  player's digit from red toward gray over the punch, instead of a flat
+ *  red-only loss color. */
+function mixHex(a: string, b: string, t: number): string {
+  const na = parseInt(a.slice(1), 16);
+  const nb = parseInt(b.slice(1), 16);
+  const mix = (shift: number) => Math.round(((na >> shift) & 0xff) * (1 - t) + ((nb >> shift) & 0xff) * t);
+  return `rgb(${mix(16)},${mix(8)},${mix(0)})`;
+}
+
 const dpr = Math.max(1, window.devicePixelRatio || 1);
 let size: CanvasSize = { width: 0, height: 0 };
 
@@ -93,6 +122,25 @@ let idleT = 0;
 let particles: Particle[] = [];
 let playerFx: PlayerFx | null = null;
 let now = performance.now();
+
+// Bullet-id -> last-seen resolvedUpTo, so advancing past a zone can be
+// diffed frame to frame (mirroring the player's own prevResolvedUpTo diff
+// below) and turned into a one-shot flash + persistent tint keyed by
+// identity, distinguishing exactly which of the four operators hit it.
+let prevBulletResolvedUpTo = new Map<number, number>();
+let bulletFx = new Map<number, BulletFx>();
+let bulletLastKind = new Map<number, BulletModKind>();
+// Obstacle index -> time since last hit, for the brief per-wall "recoil"
+// punch (a small squash/offset) that a fade-only crack effect doesn't give.
+let wallRecoil = new Map<number, number>();
+// Obstacle index -> time since a bullet or the player last passed through a
+// standing zone gate, for a brief brightness pulse (gates never disappear —
+// they're reusable — so this is the only "you just triggered me" feedback).
+let gatePulse = new Map<number, number>();
+// Obstacle index -> time since a wall's hp crossed to destroyed, driving the
+// flash -> split -> fade shatter sequence in drawObstacle instead of an
+// instant vanish.
+let wallShatter = new Map<number, number>();
 
 const RESULT_HOLD_MS = 1300;
 
@@ -172,7 +220,7 @@ function spawnBurst(x: number, y: number, color: string, count: number): void {
 
 /** Scatters fragments of the wall's own printed digits — the "digit
  *  fragments" hit-feedback the reference games use instead of plain sparks. */
-function spawnDigitFragments(x: number, y: number, value: number, color: string): void {
+function spawnDigitFragments(x: number, y: number, value: number | string, color: string): void {
   const chars = String(value).split("");
   for (const ch of chars) {
     for (let i = 0; i < 3; i++) {
@@ -217,6 +265,30 @@ function spawnConfetti(x: number, y: number, count: number): void {
       shape: "rect",
       rot: Math.random() * Math.PI * 2,
       vrot: (Math.random() - 0.5) * 12,
+    });
+  }
+}
+
+/** Bigger, paler shard debris for the moment a wall is actually destroyed —
+ *  distinct from the small blue chip-hit sparks used for a non-lethal hit. */
+function spawnGlassShards(x: number, y: number, count: number): void {
+  const palette = ["#eaffff", "#8fd0ff", "#ffffff"];
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 140 + Math.random() * 320;
+    const life = 0.5 + Math.random() * 0.5;
+    particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 120,
+      life,
+      maxLife: life,
+      color: palette[i % palette.length],
+      r: 5 + Math.random() * 7,
+      shape: "rect",
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 16,
     });
   }
 }
@@ -374,15 +446,21 @@ function drawSpeedLines(W: number, H: number): void {
 }
 
 // Self-teaching color convention, shared by items, zones, and digit bullets:
-// green/blue = add-positive, purple = multiply, red = add-negative.
-function modifierColor(kind: "add" | "mul", value: number): { fill: string; glow: string } {
+// green = add-positive, purple = multiply, red = add-negative, orange =
+// divide, yellow electric = the fire-rate gate (no text explanation, per
+// the brief).
+function modifierColor(kind: ZoneKind, value: number): { fill: string; glow: string } {
+  if (kind === "rate") return { fill: "#ffe066", glow: "rgba(255,224,102,0.9)" };
   if (kind === "mul") return { fill: "#b98bff", glow: "rgba(185,139,255,0.9)" };
+  if (kind === "div") return { fill: "#ff9d42", glow: "rgba(255,157,66,0.9)" };
   return value >= 0 ? { fill: "#57e0a0", glow: "rgba(87,224,160,0.9)" } : { fill: "#ff6b7a", glow: "rgba(255,107,122,0.9)" };
 }
 
 function labelFor(ob: Obstacle): string {
   if (ob.type === "wall") return String(ob.value);
+  if (ob.kind === "rate") return "⚡";
   if (ob.kind === "mul") return `×${ob.value}`;
+  if (ob.kind === "div") return `÷${ob.value}`;
   return ob.value >= 0 ? `+${ob.value}` : String(ob.value);
 }
 
@@ -407,26 +485,41 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
     // cyan glass / white-edged block rather than a solid slab, so several
     // stacked ahead read as "gates in a tunnel," not opaque obstacles.
     const hp = state.wallHp[index] ?? ob.value;
+    if (isWallDestroyed(hp)) {
+      const shatterT = wallShatter.get(index);
+      // Once the shatter animation has fully played (or was never started,
+      // e.g. a wall already destroyed on load), the wall is truly gone.
+      if (shatterT === undefined) {
+        ctx!.restore();
+        return;
+      }
+      drawWallShatter(ob, index, x, y, alpha, scale, laneWidth, shatterT);
+      ctx!.restore();
+      return;
+    }
     const isFinish = ob.isFinish === true;
-    const cracked = hp < ob.value && hp > 0;
-    const shattered = hp <= 0;
+    const cracked = hp < ob.value;
     const w = laneWidth * 0.82;
-    const h = Math.max(12, 52 * scale);
+    // A brief squash-and-sink "recoil" punch on the frame(s) right after a
+    // hit — the visible flinch a chip-only crack effect didn't have.
+    const recoilT = wallRecoil.get(index);
+    const recoil = recoilT !== undefined ? clamp(1 - recoilT / 0.12, 0, 1) : 0;
+    const h = Math.max(12, 52 * scale) * (1 - 0.16 * recoil);
     const pulse = isFinish ? 0.6 + 0.4 * Math.sin(idleT * 4) : 1;
     const glassFill = isFinish ? "rgba(255,196,90,0.35)" : "rgba(80,225,220,0.3)";
     const glassEdge = isFinish ? "rgba(255,196,90,0.95)" : "rgba(255,255,255,0.9)";
     const rx = x - w / 2;
-    const ry = y - h;
+    const ry = y - h + 6 * scale * recoil;
     const r = Math.min(12, w * 0.14);
 
-    ctx!.fillStyle = shattered ? "rgba(160,190,210,0.14)" : glassFill;
+    ctx!.fillStyle = glassFill;
     ctx!.shadowColor = isFinish ? "rgba(255,196,90,0.85)" : "rgba(90,220,210,0.6)";
     ctx!.shadowBlur = 16 * pulse;
     roundRect(rx, ry, w, h, r);
     ctx!.fill();
 
     ctx!.shadowBlur = 0;
-    ctx!.strokeStyle = shattered ? "rgba(255,255,255,0.35)" : glassEdge;
+    ctx!.strokeStyle = glassEdge;
     ctx!.lineWidth = Math.max(1.5, 2.4 * scale);
     roundRect(rx, ry, w, h, r);
     ctx!.stroke();
@@ -456,7 +549,7 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
       ctx!.stroke();
     }
 
-    ctx!.fillStyle = shattered ? "rgba(255,255,255,0.5)" : "#0e2a3a";
+    ctx!.fillStyle = "#0e2a3a";
     ctx!.strokeStyle = "rgba(255,255,255,0.9)";
     ctx!.lineWidth = Math.max(1, 3 * scale);
     ctx!.font = `800 ${Math.max(11, 23 * scale)}px system-ui, sans-serif`;
@@ -465,32 +558,61 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
     ctx!.strokeText(String(hp), x, y - h / 2);
     ctx!.fillText(String(hp), x, y - h / 2);
   } else if (ob.type === "zone") {
-    // A translucent cyan "glass" gate panel spanning most of the lane —
-    // reads as a distinct operator gate, not a pickup or a wall.
+    // An "energy gate" — two tinted pylons framing a pulsing field, fully
+    // colored by operator kind (fill/glow/border, not just a thin border on
+    // a generic cyan panel) — reads as a portal/field to pass through, not a
+    // pickup or a block. Never removed/consumed: a brief brightness pulse
+    // (gatePulse, keyed by obstacle index) is the only "just triggered"
+    // feedback, fired whenever a bullet or the player passes through.
     const tint = modifierColor(ob.kind, ob.value);
     const gateW = laneWidth * 0.74;
-    const gateH = Math.max(24, 82 * scale);
+    const gateH = Math.max(28, 90 * scale);
     const cy = y - gateH * 0.52;
-    const pulse = 0.7 + 0.3 * Math.sin(idleT * 3 + ob.atUnits * 5);
-    const rx = x - gateW / 2;
-    const ry = cy - gateH / 2;
-    const r = Math.min(14, gateW * 0.18);
+    const idlePulse = 0.65 + 0.35 * Math.sin(idleT * 3 + ob.atUnits * 5);
+    const hitT = gatePulse.get(index);
+    const hitPulse = hitT !== undefined ? clamp(1 - hitT / 0.45, 0, 1) : 0;
+    const pulse = Math.min(1.7, idlePulse + hitPulse * 1.1);
+    const pylonW = Math.max(4, gateW * 0.1);
+    const leftX = x - gateW / 2;
+    const rightX = x + gateW / 2;
+    const topY = cy - gateH / 2;
 
-    ctx!.fillStyle = "rgba(110,230,225,0.28)";
-    ctx!.shadowColor = "rgba(110,230,225,0.7)";
-    ctx!.shadowBlur = 18 * scale * pulse;
-    roundRect(rx, ry, gateW, gateH, r);
+    ctx!.fillStyle = shade(tint.fill, -0.2);
+    ctx!.shadowColor = tint.glow;
+    ctx!.shadowBlur = 14 * scale * pulse;
+    roundRect(leftX - pylonW / 2, topY, pylonW, gateH, pylonW * 0.4);
     ctx!.fill();
-
+    roundRect(rightX - pylonW / 2, topY, pylonW, gateH, pylonW * 0.4);
+    ctx!.fill();
     ctx!.shadowBlur = 0;
+    ctx!.strokeStyle = "rgba(255,255,255,0.75)";
+    ctx!.lineWidth = Math.max(1, 1.4 * scale);
+    roundRect(leftX - pylonW / 2, topY, pylonW, gateH, pylonW * 0.4);
+    ctx!.stroke();
+    roundRect(rightX - pylonW / 2, topY, pylonW, gateH, pylonW * 0.4);
+    ctx!.stroke();
+
+    // pulsing radial field between the pylons
+    ctx!.save();
+    ctx!.globalAlpha = alpha * (0.5 + 0.4 * pulse);
+    const grad = ctx!.createRadialGradient(x, cy, 0, x, cy, gateW * 0.55);
+    grad.addColorStop(0, tint.glow);
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx!.fillStyle = grad;
+    ctx!.beginPath();
+    ctx!.ellipse(x, cy, gateW * 0.5, gateH * 0.48, 0, 0, Math.PI * 2);
+    ctx!.fill();
+    ctx!.restore();
+
+    // an operator ring floating at the gate's center, brightening on a pulse
     ctx!.strokeStyle = tint.fill;
-    ctx!.lineWidth = Math.max(2, 3 * scale);
-    roundRect(rx, ry, gateW, gateH, r);
+    ctx!.lineWidth = Math.max(2, 3 * scale) * (0.75 + 0.4 * pulse);
+    ctx!.shadowColor = tint.glow;
+    ctx!.shadowBlur = 10 * scale * pulse;
+    ctx!.beginPath();
+    ctx!.ellipse(x, cy, gateW * 0.4, gateH * 0.4, 0, 0, Math.PI * 2);
     ctx!.stroke();
-    ctx!.strokeStyle = "rgba(255,255,255,0.85)";
-    ctx!.lineWidth = Math.max(1, 1.5 * scale);
-    roundRect(rx + 2, ry + 2, gateW - 4, gateH - 4, Math.max(1, r - 2));
-    ctx!.stroke();
+    ctx!.shadowBlur = 0;
 
     ctx!.fillStyle = "#0e2a3a";
     ctx!.strokeStyle = "rgba(255,255,255,0.95)";
@@ -519,6 +641,69 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
   }
 
   ctx!.restore();
+}
+
+const WALL_SHATTER_DURATION = 0.3;
+const WALL_SHATTER_FLASH = 0.08;
+
+/** Replaces the instant vanish-on-destroy: a full white flash for the first
+ *  ~80ms, then the block visibly splits into two halves that slide apart,
+ *  tumble slightly, and fade over the remaining ~220ms — "the wall itself
+ *  breaks apart" instead of "the wall disappears near where debris appears." */
+function drawWallShatter(
+  ob: Wall,
+  index: number,
+  x: number,
+  y: number,
+  alpha: number,
+  scale: number,
+  laneWidth: number,
+  t: number,
+): void {
+  const w = laneWidth * 0.82;
+  const h = Math.max(12, 52 * scale);
+  const topY = y - h;
+  const r = Math.min(12, w * 0.14);
+  const isFinish = ob.isFinish === true;
+  const glassFill = isFinish ? "rgba(255,196,90,0.35)" : "rgba(80,225,220,0.3)";
+  const glassEdge = isFinish ? "rgba(255,196,90,0.95)" : "rgba(255,255,255,0.9)";
+
+  const flashT = clamp(1 - t / WALL_SHATTER_FLASH, 0, 1);
+  const spreadT = clamp((t - WALL_SHATTER_FLASH) / (WALL_SHATTER_DURATION - WALL_SHATTER_FLASH), 0, 1);
+  const fade = 1 - spreadT;
+  const halfW = w / 2;
+  const shrunkH = h * (1 - 0.35 * spreadT);
+  const slide = spreadT * w * 0.55;
+  const drop = spreadT * h * 0.35;
+
+  if (fade > 0) {
+    for (const side of [-1, 1] as const) {
+      const cx = x + (side * w) / 4;
+      ctx!.save();
+      ctx!.globalAlpha = alpha * fade;
+      ctx!.translate(cx + side * slide, topY + h / 2 + drop);
+      ctx!.rotate(side * 0.28 * spreadT);
+      ctx!.fillStyle = glassFill;
+      roundRect(-halfW / 2, -shrunkH / 2, halfW, shrunkH, r);
+      ctx!.fill();
+      ctx!.strokeStyle = glassEdge;
+      ctx!.lineWidth = Math.max(1.5, 2.4 * scale);
+      roundRect(-halfW / 2, -shrunkH / 2, halfW, shrunkH, r);
+      ctx!.stroke();
+      ctx!.restore();
+    }
+  }
+
+  if (flashT > 0) {
+    ctx!.save();
+    ctx!.globalAlpha = alpha * flashT;
+    ctx!.fillStyle = "#ffffff";
+    ctx!.shadowColor = "rgba(255,255,255,0.95)";
+    ctx!.shadowBlur = 30 * scale;
+    roundRect(x - halfW, topY, w, h, r);
+    ctx!.fill();
+    ctx!.restore();
+  }
 }
 
 function roundRect(x: number, y: number, w: number, h: number, r: number): void {
@@ -564,6 +749,7 @@ function drawPlayerDigit(W: number, H: number): void {
   let scale = 1;
   let tilt = inResult ? 0 : Math.sin(idleT * 1.7) * 0.05;
   let afterimage = false;
+  let electric = false;
 
   if (inResult) {
     const punch = 1 - resultFade;
@@ -572,8 +758,11 @@ function drawPlayerDigit(W: number, H: number): void {
       glow = `rgba(255,182,72,${0.5 + 0.5 * resultFade})`;
       scale = 1 + 0.4 * punch;
     } else {
-      face = "#ff5064";
-      glow = `rgba(255,80,100,${0.5 + 0.5 * resultFade})`;
+      // Loss reads as one combined beat — shatter, then drain toward gray —
+      // rather than staying red for the whole hold.
+      const grayness = clamp(punch * 1.4, 0, 1);
+      face = mixHex("#ff5064", "#8891a1", grayness);
+      glow = `rgba(255,80,100,${0.5 * (1 - grayness) + 0.15})`;
       scale = 1 - 0.35 * punch;
       tilt = Math.sin(idleT * 50) * 0.09 * punch;
     }
@@ -593,6 +782,11 @@ function drawPlayerDigit(W: number, H: number): void {
       glow = `rgba(255,107,122,${0.55 + 0.45 * decay})`;
       scale = 1 - 0.1 * decay;
       tilt += Math.sin(idleT * 40) * 0.05 * decay;
+    } else if (playerFx.kind === "rate") {
+      face = "#ffe066";
+      glow = `rgba(255,224,102,${0.55 + 0.45 * decay})`;
+      scale = 1 + 0.08 * decay;
+      electric = decay > 0.05;
     }
   }
 
@@ -652,6 +846,26 @@ function drawPlayerDigit(W: number, H: number): void {
   ctx!.ellipse(0, fontSize * 0.4, fontSize * 0.08, fontSize * 0.04, 0, 0, Math.PI * 2);
   ctx!.fill();
 
+  // RATE+ pickup: a couple of jagged electric bolts flashed around the digit,
+  // instead of the smooth glow every other pickup gets — reads as "speed",
+  // not "value".
+  if (electric) {
+    ctx!.strokeStyle = "rgba(255,224,102,0.95)";
+    ctx!.lineWidth = Math.max(1.5, fontSize * 0.03);
+    ctx!.shadowColor = "rgba(255,224,102,0.9)";
+    ctx!.shadowBlur = 12;
+    for (const side of [-1, 1]) {
+      const bx = side * fontSize * 0.55;
+      ctx!.beginPath();
+      ctx!.moveTo(bx, -fontSize * 0.4);
+      ctx!.lineTo(bx + side * fontSize * 0.12, -fontSize * 0.1);
+      ctx!.lineTo(bx - side * fontSize * 0.08, fontSize * 0.1);
+      ctx!.lineTo(bx + side * fontSize * 0.14, fontSize * 0.4);
+      ctx!.stroke();
+    }
+    ctx!.shadowBlur = 0;
+  }
+
   ctx!.restore();
 }
 
@@ -674,13 +888,55 @@ function drawPlayerHud(W: number): void {
   ctx!.restore();
 }
 
+// Minimal fire-rate indicator: a row of pips filling in as RATE+ gates are
+// collected, no label or text — the brief is explicit that this stays
+// unexplained, taught only by bullets visibly firing faster.
+const FIRE_RATE_PIPS = 5;
+function drawFireRateHud(W: number): void {
+  if (state.status === "won" || state.status === "lost") return;
+  const frac = clamp((BULLET_FIRE_INTERVAL - state.fireRate) / (BULLET_FIRE_INTERVAL - MIN_FIRE_INTERVAL), 0, 1);
+  const filled = Math.round(frac * FIRE_RATE_PIPS);
+  if (filled <= 0) return;
+  const pipR = 3.5;
+  const gap = 10;
+  const totalW = (FIRE_RATE_PIPS - 1) * gap;
+  const cx = W / 2;
+  const y = 34;
+  ctx!.save();
+  for (let i = 0; i < FIRE_RATE_PIPS; i++) {
+    const px = cx - totalW / 2 + i * gap;
+    const lit = i < filled;
+    ctx!.fillStyle = lit ? "#ffe066" : "rgba(20,40,70,0.18)";
+    if (lit) {
+      ctx!.shadowColor = "rgba(255,224,102,0.9)";
+      ctx!.shadowBlur = 8;
+    } else {
+      ctx!.shadowBlur = 0;
+    }
+    ctx!.beginPath();
+    ctx!.arc(px, y, pipR, 0, Math.PI * 2);
+    ctx!.fill();
+  }
+  ctx!.restore();
+}
+
 // Digit bullets are real state (state.bullets, owned by game.ts's step()) —
 // this just projects them, as a white paper-plane/arrow with a trail plus a
-// blue digit badge riding just behind it. Boosted bullets (grown through a
-// +N/x2 gate) grow and brighten; reduced ones shrink and dim.
-function bulletBadgeStyle(value: number): { badge: string; glow: string; scale: number } {
-  if (value > BULLET_BASE_VALUE) return { badge: "#3b82f6", glow: "rgba(255,214,106,0.95)", scale: 1.3 };
-  if (value < BULLET_BASE_VALUE) return { badge: "#5f7a99", glow: "rgba(120,140,170,0.6)", scale: 0.82 };
+// blue digit badge riding just behind it. A bullet's *own* fired-at value
+// (spawnValue) is the baseline for "boosted vs weakened," not a global
+// constant — two bullets fired seconds apart at different player values both
+// read as "unchanged" until a zone actually touches them since then. The
+// badge is persistently tinted by the last operator that touched it
+// (bulletLastKind, set the instant its resolvedUpTo crosses a zone) so a
+// grown/multiplied/shrunk/halved bullet stays visibly distinct in flight,
+// not just for the one-shot flash.
+function bulletBadgeStyle(b: Bullet): { badge: string; glow: string; scale: number } {
+  const grow = b.value > b.spawnValue ? 1.3 : b.value < b.spawnValue ? 0.82 : 1;
+  const kind = bulletLastKind.get(b.id);
+  if (kind === "mul") return { badge: "#b98bff", glow: "rgba(185,139,255,0.95)", scale: Math.max(grow, 1.3) };
+  if (kind === "div") return { badge: "#ff9d42", glow: "rgba(255,157,66,0.9)", scale: Math.min(grow, 0.82) };
+  if (kind === "sub") return { badge: "#ff6b7a", glow: "rgba(255,107,122,0.9)", scale: Math.min(grow, 0.82) };
+  if (kind === "add") return { badge: "#57e0a0", glow: "rgba(87,224,160,0.9)", scale: Math.max(grow, 1.05) };
   return { badge: "#3b82f6", glow: "rgba(120,190,255,0.85)", scale: 1 };
 }
 
@@ -703,7 +959,7 @@ function drawArrow(x: number, y: number, r: number, alpha: number): void {
 
 function drawBullets(W: number, H: number): void {
   for (const b of state.bullets) {
-    const style = bulletBadgeStyle(b.value);
+    const style = bulletBadgeStyle(b);
 
     // fading trail stamps (the plane's own past positions)
     for (const trailBack of [0.16, 0.09]) {
@@ -755,6 +1011,31 @@ function drawBullets(W: number, H: number): void {
     ctx!.textBaseline = "middle";
     ctx!.fillText(String(b.value), bx, by);
     ctx!.restore();
+
+    // one-shot flash ring the moment a zone just changed this specific
+    // bullet's value — green (add), purple (multiply), red (subtract),
+    // orange (divide) — keyed by Bullet.id so it tracks this bullet across
+    // frames, not a badge index.
+    const fx = bulletFx.get(b.id);
+    if (fx) {
+      const decay = clamp(1 - fx.t / 0.35, 0, 1);
+      const ringColor =
+        fx.kind === "mul"
+          ? "rgba(185,139,255,0.95)"
+          : fx.kind === "div"
+            ? "rgba(255,157,66,0.95)"
+            : fx.kind === "sub"
+              ? "rgba(255,107,122,0.95)"
+              : "rgba(87,224,160,0.95)";
+      ctx!.save();
+      ctx!.globalAlpha = alpha * decay;
+      ctx!.strokeStyle = ringColor;
+      ctx!.lineWidth = Math.max(1.5, 2.2 * scale);
+      ctx!.beginPath();
+      ctx!.ellipse(bx, by, badgeR * (1 + 0.9 * (1 - decay)), badgeR * 0.86 * (1 + 0.9 * (1 - decay)), 0, 0, Math.PI * 2);
+      ctx!.stroke();
+      ctx!.restore();
+    }
   }
 }
 
@@ -826,6 +1107,35 @@ function drawResultFlash(W: number, H: number): void {
   ctx!.fillRect(0, 0, W, H);
 }
 
+// Shown once the loss punch has had a moment to read, per the brief's
+// "concise failure state and a restart button" — the existing RESULT_HOLD_MS
+// auto-reset stays as a fallback if nobody taps.
+const RESTART_SHOW_DELAY_MS = 300;
+function restartReady(): boolean {
+  return state.status === "lost" && resultAt !== null && now - resultAt >= RESTART_SHOW_DELAY_MS;
+}
+function drawRestartAffordance(W: number, H: number): void {
+  if (!restartReady()) return;
+  const y = H * 0.62;
+  ctx!.save();
+  ctx!.globalAlpha = clamp((now - (resultAt ?? 0) - RESTART_SHOW_DELAY_MS) / 250, 0, 1);
+  ctx!.fillStyle = "rgba(20,30,50,0.55)";
+  const w = Math.min(200, W * 0.5);
+  const h = 46;
+  roundRect(W / 2 - w / 2, y - h / 2, w, h, 12);
+  ctx!.fill();
+  ctx!.strokeStyle = "rgba(255,255,255,0.8)";
+  ctx!.lineWidth = 2;
+  roundRect(W / 2 - w / 2, y - h / 2, w, h, 12);
+  ctx!.stroke();
+  ctx!.fillStyle = "#fff";
+  ctx!.font = `800 ${Math.max(16, W * 0.045)}px system-ui, sans-serif`;
+  ctx!.textAlign = "center";
+  ctx!.textBaseline = "middle";
+  ctx!.fillText("RESTART", W / 2, y + 1);
+  ctx!.restore();
+}
+
 function draw(): void {
   const { width: W, height: H } = size;
   if (W === 0 || H === 0) return;
@@ -846,6 +1156,7 @@ function draw(): void {
   drawPlayerDigit(W, H);
   drawProgress(W);
   drawPlayerHud(W);
+  drawFireRateHud(W);
 
   for (const p of particles) {
     ctx!.save();
@@ -874,8 +1185,27 @@ function draw(): void {
   ctx!.globalAlpha = 1;
 
   drawResultFlash(W, H);
+  drawRestartAffordance(W, H);
   ctx!.restore();
 }
+
+function restartNow(): void {
+  best = Math.max(best, state.worldX / TRACK_LENGTH);
+  state = createInitialState();
+  desiredLane = state.lane;
+  resultAt = null;
+  idleT = 0;
+  prevBulletResolvedUpTo = new Map();
+  bulletFx = new Map();
+  bulletLastKind = new Map();
+  wallRecoil = new Map();
+  gatePulse = new Map();
+  wallShatter = new Map();
+}
+
+canvas.addEventListener("pointerdown", () => {
+  if (restartReady()) restartNow();
+});
 
 let last = performance.now();
 
@@ -887,13 +1217,7 @@ function frame(t: number): void {
 
   if (state.status === "won" || state.status === "lost") {
     if (resultAt === null) resultAt = t;
-    if (t - resultAt > RESULT_HOLD_MS) {
-      best = Math.max(best, state.worldX / TRACK_LENGTH);
-      state = createInitialState();
-      desiredLane = state.lane;
-      resultAt = null;
-      idleT = 0;
-    }
+    if (t - resultAt > RESULT_HOLD_MS) restartNow();
   } else {
     const prevResolvedUpTo = state.resolvedUpTo;
     const prevStatus = state.status;
@@ -908,7 +1232,11 @@ function frame(t: number): void {
       if ((ob.type === "zone" || ob.type === "item") && touchedPlayer) {
         const colors = modifierColor(ob.kind, ob.value);
         spawnBurst(fx, fy, colors.fill, 14);
-        playerFx = { kind: ob.kind === "mul" ? "mult" : ob.value >= 0 ? "gain" : "loss", t: 0 };
+        playerFx = {
+          kind: ob.kind === "rate" ? "rate" : ob.kind === "mul" ? "mult" : ob.value >= 0 ? "gain" : "loss",
+          t: 0,
+        };
+        if (ob.type === "zone") gatePulse.set(i, 0);
       } else if (isLastResolved && state.status === "lost") {
         spawnBurst(fx, fy, "#ff5064", 24);
         spawnDigitFragments(fx, fy, state.playerValue, "#ff5064");
@@ -934,20 +1262,84 @@ function frame(t: number): void {
     // Bullet-vs-wall feedback: a white flash burst + scattering digit
     // fragments the instant a wall's live hp drops, plus a slight screen
     // shake — even while the player themselves is still well short of it.
+    // A hit that crosses hp from >0 to <=0 is the killing blow: a distinctly
+    // bigger, wider burst plus a stronger shake, not the same small chip fx.
     for (let i = 0; i < OBSTACLES.length; i++) {
       const ob = OBSTACLES[i];
       if (ob.type !== "wall") continue;
       const prevHp = prevWallHp[i] ?? ob.value;
       if (state.wallHp[i] < prevHp) {
+        wallRecoil.set(i, 0);
         const distanceAhead = ob.atUnits - state.worldX;
         if (visibleAt(distanceAhead)) {
           const d = depthOf(distanceAhead);
           const wx = laneCenterX(ob.lane, d, size.width);
           const wy = yAt(d, size.height);
-          spawnBurst(wx, wy, "#ffffff", 8);
-          spawnDigitFragments(wx, wy, prevHp - state.wallHp[i], "#8fd0ff");
-          triggerShake(0.12);
+          const destroyed = prevHp > 0 && isWallDestroyed(state.wallHp[i]);
+          if (destroyed) {
+            spawnBurst(wx, wy, "#ffffff", 30);
+            spawnGlassShards(wx, wy, 14);
+            spawnDigitFragments(wx, wy, `-${prevHp - state.wallHp[i]}`, "#8fd0ff");
+            triggerShake(0.4);
+            wallShatter.set(i, 0);
+          } else {
+            spawnBurst(wx, wy, "#ffffff", 8);
+            spawnDigitFragments(wx, wy, `-${prevHp - state.wallHp[i]}`, "#8fd0ff");
+            triggerShake(0.12);
+          }
         }
+      }
+    }
+  }
+
+  for (const [i, t] of wallRecoil) {
+    const next = t + dt;
+    if (next > 0.12) wallRecoil.delete(i);
+    else wallRecoil.set(i, next);
+  }
+
+  for (const [i, t] of gatePulse) {
+    const next = t + dt;
+    if (next > 0.45) gatePulse.delete(i);
+    else gatePulse.set(i, next);
+  }
+
+  for (const [i, t] of wallShatter) {
+    const next = t + dt;
+    if (next > WALL_SHATTER_DURATION) wallShatter.delete(i);
+    else wallShatter.set(i, next);
+  }
+
+  for (const [id, fx] of bulletFx) {
+    const next = { ...fx, t: fx.t + dt };
+    if (next.t > 0.35) bulletFx.delete(id);
+    else bulletFx.set(id, next);
+  }
+
+  {
+    // Mirrors the player's own prevResolvedUpTo diff above, but per bullet:
+    // whenever a bullet's resolvedUpTo advances past a zone in its own lane,
+    // that zone's kind is exactly what just modified it — lets the flash and
+    // the persistent badge tint distinguish all four operators, not just a
+    // binary bigger/smaller.
+    const seen = new Set<number>();
+    for (const b of state.bullets) {
+      seen.add(b.id);
+      const prevRUT = prevBulletResolvedUpTo.get(b.id) ?? b.resolvedUpTo;
+      for (let i = prevRUT; i < b.resolvedUpTo; i++) {
+        const ob = OBSTACLES[i];
+        if (ob.type !== "zone" || ob.lane !== b.lane || ob.kind === "rate") continue;
+        const kind: BulletModKind = ob.kind === "mul" ? "mul" : ob.kind === "div" ? "div" : ob.value >= 0 ? "add" : "sub";
+        bulletFx.set(b.id, { kind, t: 0 });
+        bulletLastKind.set(b.id, kind);
+        gatePulse.set(i, 0);
+      }
+      prevBulletResolvedUpTo.set(b.id, b.resolvedUpTo);
+    }
+    for (const id of prevBulletResolvedUpTo.keys()) {
+      if (!seen.has(id)) {
+        prevBulletResolvedUpTo.delete(id);
+        bulletLastKind.delete(id);
       }
     }
   }

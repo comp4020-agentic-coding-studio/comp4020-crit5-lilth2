@@ -8,19 +8,26 @@
 // gauntlet, the difficulty ramp) is built on that single comparison, repeated
 // with bigger numbers.
 //
-// The player auto-fires digit bullets down their current lane. A "zone" is a
-// floating +N/×N/-N gate: it modifies playerValue if the player is in its
-// lane when they reach it (exactly like the old item pickups did), and it
-// *also* modifies any bullet that flies through it first — so a wall can
-// already be partially chipped down (via wallHp, tracked per-wall alongside
-// the static OBSTACLES data) before the player themselves ever arrives at it.
-// The win/loss comparison itself never changes: canBreakWall(playerValue,
-// wallValue) still decides everything, it's just compared against the wall's
-// current (possibly bullet-damaged) value instead of always its full one.
+// The player auto-fires digit bullets down their current lane, and every
+// bullet's power equals playerValue *at the moment it was fired* — a bullet
+// already in flight keeps that value even after playerValue changes again. A
+// "zone" is a floating +N/×N/-N/RATE+ gate: it modifies playerValue if the
+// player is in its lane when they reach it (exactly like the old item
+// pickups did), and it *also* modifies any bullet that flies through it
+// first — so a wall can already be partially chipped down (via wallHp,
+// tracked per-wall alongside the static OBSTACLES data) before the player
+// themselves ever arrives at it. A -N gate weakens (bullet or player) but
+// floors at 1 rather than being a death trap; RATE+ has no bullet value to
+// change, so it speeds up the player's own fire rate instead, floored at
+// MIN_FIRE_INTERVAL. The win/loss comparison itself never changes:
+// canBreakWall(playerValue, wallValue) still decides everything, it's just
+// compared against the wall's current (possibly bullet-damaged) value
+// instead of always its full one.
 
 export type Lane = 0 | 1 | 2;
 export type Status = "playing" | "won" | "lost";
 export type ItemKind = "add" | "mul";
+export type ZoneKind = "add" | "mul" | "rate" | "div";
 
 export interface NumberItem {
   type: "item";
@@ -43,29 +50,40 @@ export interface Wall {
 }
 
 /**
- * A floating operator gate: +N / ×N / -N (a negative "add"). Affects the
- * player if they're in its lane when they arrive, and affects any digit
+ * A floating operator gate: +N / ×N / -N (a negative "add") / RATE+. Affects
+ * the player if they're in its lane when they arrive, and affects any digit
  * bullet that flies through it in that lane first — the mechanic that lets a
  * bullet arrive at a wall already boosted (or weakened) by what it passed
- * through on the way.
+ * through on the way. A "rate" zone has no bullet value to change, so it
+ * speeds up the player's own fire rate instead, whichever of player or
+ * bullet triggers it first.
  */
 export interface Zone {
   type: "zone";
   atUnits: number;
   lane: Lane;
-  kind: ItemKind;
+  kind: ZoneKind;
   value: number;
 }
 
 export type Obstacle = NumberItem | Wall | Zone;
 
 /** A digit bullet, auto-fired down the lane the player was in at the moment
- * it was fired. Travels forward through the same track-unit space obstacles
- * live in, faster than the world scrolls, so it always reaches a given
- * obstacle before the player's own position does. */
+ * it was fired, carrying playerValue *at that moment* as its power. Travels
+ * forward through the same track-unit space obstacles live in, faster than
+ * the world scrolls, so it always reaches a given obstacle before the
+ * player's own position does. */
 export interface Bullet {
+  /** Stable per-bullet identity, so a renderer can track "this exact bullet
+   *  just got modified" across frames instead of only ever seeing the
+   *  current value. */
+  id: number;
   lane: Lane;
   value: number;
+  /** value at the moment this bullet was fired — frozen, never changes —
+   *  the baseline a renderer compares the live `value` against to decide
+   *  "boosted" vs "weakened" styling. */
+  spawnValue: number;
   atUnits: number;
   /** Mirrors GameState.resolvedUpTo, but per-bullet: which OBSTACLES index
    *  this bullet has already resolved past, so it doesn't re-trigger a zone
@@ -98,6 +116,12 @@ export interface GameState {
   bullets: Bullet[];
   /** Seconds until the next auto-fired bullet. */
   bulletTimer: number;
+  /** Current interval (seconds) between auto-fired bullets — starts at
+   *  BULLET_FIRE_INTERVAL and only ever decreases, via RATE+ gates, floored
+   *  at MIN_FIRE_INTERVAL. Persists for the rest of the run. */
+  fireRate: number;
+  /** Monotonic counter handed out as the next bullet's `id`. */
+  nextBulletId: number;
   /** Current (possibly bullet-damaged) hp for every OBSTACLES entry, indexed
    *  the same way; only meaningful where OBSTACLES[i].type === "wall". */
   wallHp: number[];
@@ -111,7 +135,11 @@ export interface CanvasSize {
 // --- Tunables, all in resolution-independent track units / seconds, so the
 // level plays out identically regardless of canvas size. ---
 export const LANES = 3;
-export const PLAYER_START_VALUE = 2;
+// 4, not 2: the opening frame is the whole tutorial. Player fires 4s, the
+// first wall (12) takes exactly three of them, then a x2 gate turns
+// player/bullets into 8 — the rule ("bullet power = your current number")
+// has to be legible from that sequence alone, with no on-screen text.
+export const PLAYER_START_VALUE = 4;
 export const LANE_ANIM_DURATION = 0.22; // seconds for a lane-change slide
 // Raised again (~30% on top of the prior 0.32/0.44 pass, track compressed
 // ~15%) after the reference-image playtest read the run as still too sedate
@@ -119,7 +147,7 @@ export const LANE_ANIM_DURATION = 0.22; // seconds for a lane-change slide
 // PROCESS.md for the before/after.
 export const BASE_SPEED = 0.42; // track units/sec at the start
 export const MAX_SPEED = 0.57; // track units/sec at the finish
-export const TRACK_LENGTH = 7.65; // track units to the finish gauntlet
+export const TRACK_LENGTH = 9.7; // track units to the finish gauntlet
 /** Half-width, in track units, of the window in which an obstacle resolves. */
 export const HIT_HALF = 0.12;
 
@@ -127,52 +155,100 @@ export const HIT_HALF = 0.12;
  *  faster than MAX_SPEED, so a bullet fired this frame always reaches any
  *  obstacle ahead before the player's own worldX does. */
 export const BULLET_SPEED = 3.0;
-/** Seconds between auto-fired bullets. */
-export const BULLET_FIRE_INTERVAL = 0.45;
-/** Every bullet starts at this value; zones grow/shrink it from there. */
-export const BULLET_BASE_VALUE = 1;
+/** Starting seconds between auto-fired bullets — GameState.fireRate begins
+ *  here and only ever drops, via RATE+ gates. Slowed from 0.45s to force real
+ *  route decisions instead of brute-forcing every wall via bullet volume. */
+export const BULLET_FIRE_INTERVAL = 0.75;
+/** RATE+ shaves this many seconds off the fire interval per gate passed. */
+export const RATE_BOOST_STEP = 0.09;
+/** Fire interval can never drop below this, however many RATE+ gates a run
+ *  collects — the cap that keeps the fire-rate gate from trivializing pacing. */
+export const MIN_FIRE_INTERVAL = 0.32;
 /** Bullets past this point are off the visible track and despawn. */
 export const BULLET_MAX_REACH = TRACK_LENGTH + 0.5;
+/** A freshly-fired bullet spawns this far ahead of the player's own position
+ *  — just enough that it doesn't render exactly on top of the player digit
+ *  on its very first frame. Purely cosmetic; resolution timing is unaffected
+ *  since bullets travel far faster than this offset. */
+export const SPAWN_AHEAD = 0.03;
 
-// Hand-authored level, in four segments plus a finish gauntlet. Every
-// +N/×N/-N moment is now a "zone" (a floating gate), not a touch-only item:
-// a zone modifies the player if they're in its lane when they arrive, *and*
-// modifies any digit bullet that flies through it first, so a wall can
-// already be chipped down before the player themselves gets there.
+// Hand-authored level, in four segments plus a finish gauntlet — re-tuned for
+// round four's much slower fire rate and much bigger walls (see PROCESS.md
+// for the balance pass this took). Every +N/×N/-N/÷N/RATE+ moment is a
+// "zone" (a floating gate): it modifies the player if they're in its lane
+// when they arrive, *and* modifies any digit bullet that flies through it
+// first, so a wall can already be chipped down before the player themselves
+// gets there. Zones are standing/reusable — passing through never removes
+// or one-time-consumes a gate.
 //
-// 1. Teaching pair: two +1 zones dead ahead in the player's own starting
-//    lane, then a wall (value 2) obviously smaller than the number the
-//    player is now carrying — the first "I'm bigger, I can break this"
-//    moment. The opening zone also grows the very first auto-fired bullet
-//    on screen, so a stranger sees a bullet visibly get bigger before it
-//    chips the first wall, without a word of explanation.
-// 2. First fork: a red -3 zone sits off to one side, a green +4 zone off the
-//    other; the middle lane stays clear, so touching the danger is a
-//    choice, not a trap.
-// 3. A ×2 zone followed by a heavier wall, escalating the same rule.
-// 4. A bonus +5 zone, then two consecutive walls close together, needing
-//    value banked in advance.
-// 5. Finish gauntlet: three walls side by side, one per lane (16 / 32 / 64).
-//    Whichever lane you're in when you arrive is the number you must beat —
-//    smash through it and you win; anything else is a crash.
+// 1. Teaching: a free ×2 gate sits in the middle lane before the very first
+//    wall (24) — no side-trip needed, so "a gate changes your number" is
+//    legible before a single fork choice exists. From there every wall in
+//    the level lives in the middle lane, and every fork offers a beneficial
+//    zone on one side and a punishing one on the other — the middle lane
+//    itself is always a safe (if unhelped) way through a fork.
+// 2. Mid tier (90, 130, 180) introduces the first ÷2 "weaken" gates as the
+//    trap side of a fork — mechanically identical to a -N gate (floors at
+//    1) but reads and behaves as a division, not a subtraction.
+// 3. Late tier (260, 360, 480) raises the stakes further: two more ÷2 traps
+//    guard the segment, alongside a RATE+ gate for players leaning on bullet
+//    chip rather than raw value.
+// 4. Finish approach feeds one last pair of forks (including a final ÷2
+//    trap) into the finish gauntlet: three walls side by side, one per lane
+//    (600 / 850 / 1200). Whichever lane you're in when you arrive is the
+//    number you must beat — smash through it and you win; anything else is
+//    a crash. A weaker (buff-missing) run only clears the lighter lanes, so
+//    reading your own number against the three printed values still matters
+//    even though a fully-optimized run can clear all three.
 export const OBSTACLES: readonly Obstacle[] = [
-  { type: "zone", atUnits: 0.34, lane: 1, kind: "add", value: 1 },
-  { type: "zone", atUnits: 0.89, lane: 1, kind: "add", value: 1 },
-  { type: "wall", atUnits: 1.53, lane: 1, value: 2 },
+  { type: "zone", atUnits: 1.0, lane: 1, kind: "mul", value: 2 },
 
-  { type: "zone", atUnits: 2.72, lane: 0, kind: "add", value: -3 },
-  { type: "zone", atUnits: 2.72, lane: 2, kind: "add", value: 4 },
+  { type: "zone", atUnits: 1.35, lane: 2, kind: "add", value: 18 },
+  { type: "zone", atUnits: 1.35, lane: 0, kind: "add", value: -8 },
+  { type: "wall", atUnits: 1.7, lane: 1, value: 24 },
 
-  { type: "zone", atUnits: 3.66, lane: 1, kind: "mul", value: 2 },
-  { type: "wall", atUnits: 4.34, lane: 1, value: 6 },
+  { type: "zone", atUnits: 2.1, lane: 2, kind: "add", value: 14 },
+  { type: "zone", atUnits: 2.1, lane: 0, kind: "add", value: -10 },
+  { type: "wall", atUnits: 2.5, lane: 1, value: 36 },
 
-  { type: "zone", atUnits: 5.27, lane: 2, kind: "add", value: 5 },
-  { type: "wall", atUnits: 5.95, lane: 1, value: 10 },
-  { type: "wall", atUnits: 6.63, lane: 1, value: 14 },
+  { type: "zone", atUnits: 2.9, lane: 2, kind: "add", value: 14 },
+  { type: "zone", atUnits: 2.9, lane: 0, kind: "add", value: -12 },
+  { type: "wall", atUnits: 3.3, lane: 1, value: 48 },
 
-  { type: "wall", atUnits: 7.31, lane: 0, value: 16, isFinish: true },
-  { type: "wall", atUnits: 7.31, lane: 1, value: 32, isFinish: true },
-  { type: "wall", atUnits: 7.31, lane: 2, value: 64, isFinish: true },
+  { type: "zone", atUnits: 3.7, lane: 2, kind: "add", value: 40 },
+  { type: "zone", atUnits: 3.7, lane: 0, kind: "add", value: -20 },
+  { type: "wall", atUnits: 4.1, lane: 1, value: 90 },
+
+  { type: "zone", atUnits: 4.5, lane: 2, kind: "mul", value: 2 },
+  { type: "zone", atUnits: 4.5, lane: 0, kind: "div", value: 2 },
+  { type: "wall", atUnits: 4.9, lane: 1, value: 130 },
+
+  { type: "zone", atUnits: 5.3, lane: 2, kind: "add", value: 30 },
+  { type: "zone", atUnits: 5.3, lane: 0, kind: "add", value: -40 },
+  { type: "wall", atUnits: 5.7, lane: 1, value: 180 },
+
+  { type: "zone", atUnits: 6.1, lane: 2, kind: "add", value: 60 },
+  { type: "zone", atUnits: 6.1, lane: 0, kind: "add", value: -50 },
+  { type: "wall", atUnits: 6.5, lane: 1, value: 260 },
+
+  { type: "zone", atUnits: 6.9, lane: 2, kind: "add", value: 100 },
+  { type: "zone", atUnits: 6.9, lane: 0, kind: "add", value: -60 },
+  { type: "wall", atUnits: 7.3, lane: 1, value: 360 },
+
+  { type: "zone", atUnits: 7.7, lane: 2, kind: "mul", value: 2 },
+  { type: "zone", atUnits: 7.7, lane: 0, kind: "div", value: 2 },
+  { type: "zone", atUnits: 8.1, lane: 2, kind: "rate", value: 0 },
+  { type: "zone", atUnits: 8.1, lane: 0, kind: "add", value: -100 },
+  { type: "wall", atUnits: 8.5, lane: 1, value: 480 },
+
+  { type: "zone", atUnits: 8.9, lane: 2, kind: "add", value: 150 },
+  { type: "zone", atUnits: 8.9, lane: 0, kind: "add", value: -120 },
+  { type: "zone", atUnits: 9.3, lane: 2, kind: "add", value: 50 },
+  { type: "zone", atUnits: 9.3, lane: 0, kind: "div", value: 2 },
+
+  { type: "wall", atUnits: 9.7, lane: 0, value: 600, isFinish: true },
+  { type: "wall", atUnits: 9.7, lane: 1, value: 850, isFinish: true },
+  { type: "wall", atUnits: 9.7, lane: 2, value: 1200, isFinish: true },
 ];
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -199,6 +275,8 @@ export function createInitialState(): GameState {
     resolvedUpTo: 0,
     bullets: [],
     bulletTimer: 0.15,
+    fireRate: BULLET_FIRE_INTERVAL,
+    nextBulletId: 0,
     wallHp: OBSTACLES.map((ob) => (ob.type === "wall" ? ob.value : 0)),
   };
 }
@@ -208,19 +286,78 @@ export function collectItem(playerValue: number, item: NumberItem): number {
   return item.kind === "mul" ? playerValue * item.value : playerValue + item.value;
 }
 
-/** Applies a zone's effect to a digit bullet flying through it. */
+/** Applies a zone's effect to a digit bullet flying through it. A "-N" (add,
+ *  negative value) floors at 1 rather than being able to zero or negate a
+ *  bullet outright; "div" floors the same way, at 1. "rate" zones have no
+ *  bullet-side effect (see applyRateBoost) so callers should special-case
+ *  that kind before reaching here. */
 export function applyModifierToBullet(bulletValue: number, zone: Zone): number {
-  return zone.kind === "mul" ? bulletValue * zone.value : bulletValue + zone.value;
+  if (zone.kind === "mul") return bulletValue * zone.value;
+  if (zone.kind === "div") return Math.max(1, Math.floor(bulletValue / zone.value));
+  return Math.max(1, bulletValue + zone.value);
 }
 
-/** Applies a zone's effect to the player's number (same shape as collectItem). */
+/** Applies a zone's effect to the player's number (same shape as
+ *  applyModifierToBullet, including the same "floors at 1" clamps). */
 export function applyModifierToPlayer(playerValue: number, zone: Zone): number {
-  return zone.kind === "mul" ? playerValue * zone.value : playerValue + zone.value;
+  if (zone.kind === "mul") return playerValue * zone.value;
+  if (zone.kind === "div") return Math.max(1, Math.floor(playerValue / zone.value));
+  return Math.max(1, playerValue + zone.value);
+}
+
+/** A projectile modifier in the brief's literal `{ type, value }` shape —
+ *  kept as a small standalone adapter (not wired into `step()`, which stays
+ *  on the `Zone`/`applyModifierTo*` path above) purely so it can be tested
+ *  verbatim against the four operator names the brief specifies. "subtract"
+ *  here is the same "floors at 1" clamp as a negative-value "add" zone. */
+export interface ProjectileModifier {
+  type: "add" | "multiply" | "subtract" | "divide";
+  value: number;
+}
+
+export function applyProjectileModifier(value: number, mod: ProjectileModifier): number {
+  switch (mod.type) {
+    case "add":
+      return Math.max(1, value + mod.value);
+    case "subtract":
+      return Math.max(1, value - mod.value);
+    case "multiply":
+      return value * mod.value;
+    case "divide":
+      return Math.max(1, Math.floor(value / mod.value));
+  }
+}
+
+/** RATE+ gates shave a fixed amount off the fire interval, floored so the
+ *  cadence can never get faster than MIN_FIRE_INTERVAL however many gates a
+ *  run collects. */
+export function applyRateBoost(currentFireInterval: number): number {
+  return Math.max(MIN_FIRE_INTERVAL, currentFireInterval - RATE_BOOST_STEP);
 }
 
 /** A bullet chipping a wall: the wall's hp drops by the bullet's value, floored at 0. */
 export function resolveWallHit(wallValue: number, bulletValue: number): number {
   return Math.max(0, wallValue - bulletValue);
+}
+
+/** A wall whose live hp has reached zero is destroyed — the single check the
+ *  renderer and the tests both use, so "destroyed" always means one thing. */
+export function isWallDestroyed(remainingValue: number): boolean {
+  return remainingValue <= 0;
+}
+
+/** Builds a freshly auto-fired bullet: power is always playerValue *at the
+ *  moment it's fired* — the core rule this whole update exists for. Once
+ *  created, a bullet's `value` only changes by flying through a zone; it
+ *  never re-syncs to a playerValue that's since moved on. */
+export function spawnBullet(
+  playerValue: number,
+  lane: Lane,
+  atUnits: number,
+  resolvedUpTo: number,
+  id: number,
+): Bullet {
+  return { id, lane, value: playerValue, spawnValue: playerValue, atUnits, resolvedUpTo };
 }
 
 /** The one rule the whole game rests on: big enough number, or you crash. */
@@ -246,6 +383,9 @@ export function resolveCollision(state: GameState, obstacle: Obstacle): GameStat
   }
 
   if (obstacle.type === "zone") {
+    if (obstacle.kind === "rate") {
+      return { ...state, fireRate: applyRateBoost(state.fireRate) };
+    }
     return { ...state, playerValue: applyModifierToPlayer(state.playerValue, obstacle) };
   }
 
@@ -304,22 +444,22 @@ export function step(state: GameState, dt: number, laneInput: Lane | null): Game
   // --- Digit bullets: auto-fire down the player's current lane, then race
   // ahead of the player through the same obstacle list, applying zone
   // modifiers to themselves and chipping wallHp when they hit a wall — all
-  // before the player-obstacle loop below ever runs for this frame. ---
+  // before the player-obstacle loop below ever runs for this frame.
+  //
+  // Only bullets that already existed at the *start* of this frame move and
+  // resolve now. A bullet freshly fired this frame is only ever spawned, never
+  // advanced/resolved in the same step() call that creates it — otherwise a
+  // bullet spawned right next to a wall/zone could be created and immediately
+  // consumed before ever reaching a rendered frame, which is exactly what
+  // made bullets sometimes appear to "not fire" at all. It gets its first
+  // movement and resolution starting next frame, same as always. ---
   const wallHp = working.wallHp.slice();
   let bulletTimer = working.bulletTimer - dt;
-  const firedBullets: Bullet[] = working.bullets.map((b) => ({ ...b }));
-  while (bulletTimer <= 0) {
-    firedBullets.push({
-      lane: working.lane,
-      value: BULLET_BASE_VALUE,
-      atUnits: worldX,
-      resolvedUpTo: working.resolvedUpTo,
-    });
-    bulletTimer += BULLET_FIRE_INTERVAL;
-  }
+  let fireRate = working.fireRate;
+  let nextBulletId = working.nextBulletId;
 
   const survivingBullets: Bullet[] = [];
-  for (const fired of firedBullets) {
+  for (const fired of working.bullets) {
     let bullet: Bullet = { ...fired, atUnits: fired.atUnits + BULLET_SPEED * dt };
     let spent = false;
     while (
@@ -329,7 +469,11 @@ export function step(state: GameState, dt: number, laneInput: Lane | null): Game
       const ob = OBSTACLES[bullet.resolvedUpTo];
       if (ob.lane === bullet.lane) {
         if (ob.type === "zone") {
-          bullet = { ...bullet, value: applyModifierToBullet(bullet.value, ob) };
+          if (ob.kind === "rate") {
+            fireRate = applyRateBoost(fireRate);
+          } else {
+            bullet = { ...bullet, value: applyModifierToBullet(bullet.value, ob) };
+          }
         } else if (ob.type === "wall") {
           wallHp[bullet.resolvedUpTo] = resolveWallHit(wallHp[bullet.resolvedUpTo], bullet.value);
           spent = true;
@@ -342,7 +486,14 @@ export function step(state: GameState, dt: number, laneInput: Lane | null): Game
       survivingBullets.push(bullet);
     }
   }
-  working = { ...working, wallHp, bulletTimer, bullets: survivingBullets };
+  while (bulletTimer <= 0) {
+    survivingBullets.push(
+      spawnBullet(working.playerValue, working.lane, worldX + SPAWN_AHEAD, working.resolvedUpTo, nextBulletId),
+    );
+    nextBulletId += 1;
+    bulletTimer += fireRate;
+  }
+  working = { ...working, wallHp, bulletTimer, fireRate, nextBulletId, bullets: survivingBullets };
 
   let resolvedUpTo = working.resolvedUpTo;
   while (resolvedUpTo < OBSTACLES.length && worldX >= OBSTACLES[resolvedUpTo].atUnits) {

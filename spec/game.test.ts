@@ -1,19 +1,26 @@
 import { describe, expect, it } from "vitest";
 import {
+  BULLET_FIRE_INTERVAL,
   HIT_HALF,
   LANE_ANIM_DURATION,
+  MIN_FIRE_INTERVAL,
   OBSTACLES,
   TRACK_LENGTH,
   applyModifierToBullet,
   applyModifierToPlayer,
+  applyProjectileModifier,
+  applyRateBoost,
   canBreakWall,
   checkEndCondition,
   collectItem,
   createInitialState,
+  isWallDestroyed,
   resolveCollision,
   resolveWallHit,
+  spawnBullet,
   step,
   type GameState,
+  type ProjectileModifier,
   type Wall,
   type Zone,
 } from "../game";
@@ -37,6 +44,8 @@ function stateInLane(lane: 0 | 1 | 2, playerValue: number): GameState {
     resolvedUpTo: 0,
     bullets: [],
     bulletTimer: 999,
+    fireRate: BULLET_FIRE_INTERVAL,
+    nextBulletId: 0,
     wallHp: [],
   };
 }
@@ -110,16 +119,104 @@ describe("zones: the operator gates that modify bullets and the player alike", (
     expect(applyModifierToPlayer(5, timesTwo)).toBe(10);
   });
 
+  it("a -N zone floors at 1 instead of zeroing or negating the value it hits", () => {
+    const bigMinus: Zone = { type: "zone", atUnits: 0, lane: 0, kind: "add", value: -50 };
+    expect(applyModifierToBullet(5, bigMinus)).toBe(1);
+    expect(applyModifierToPlayer(5, bigMinus)).toBe(1);
+  });
+
   it("resolveCollision applies a zone to the player when touched", () => {
     const next = resolveCollision(stateInLane(0, 5), addFour);
     expect(next.playerValue).toBe(9);
     expect(next.status).toBe("playing");
+  });
+
+  it("resolveCollision applies a RATE+ zone to fireRate instead of playerValue", () => {
+    const rateZone: Zone = { type: "zone", atUnits: 0, lane: 0, kind: "rate", value: 0 };
+    const next = resolveCollision(stateInLane(0, 5), rateZone);
+    expect(next.playerValue).toBe(5);
+    expect(next.fireRate).toBe(applyRateBoost(BULLET_FIRE_INTERVAL));
+  });
+
+  const divideByTwo: Zone = { type: "zone", atUnits: 0, lane: 0, kind: "div", value: 2 };
+
+  it("applyModifierToBullet: a ÷2 zone halves and floors a bullet's value", () => {
+    expect(applyModifierToBullet(9, divideByTwo)).toBe(4);
+    expect(applyModifierToBullet(10, divideByTwo)).toBe(5);
+  });
+
+  it("applyModifierToPlayer: a ÷2 zone halves and floors the player's value the same way", () => {
+    expect(applyModifierToPlayer(9, divideByTwo)).toBe(4);
+  });
+
+  it("a ÷N zone floors at 1 instead of ever reaching 0", () => {
+    const divideByFifty: Zone = { type: "zone", atUnits: 0, lane: 0, kind: "div", value: 50 };
+    expect(applyModifierToBullet(5, divideByFifty)).toBe(1);
+    expect(applyModifierToPlayer(5, divideByFifty)).toBe(1);
+  });
+});
+
+describe("spawnBullet: bullet power is the player's current number, not a fixed constant", () => {
+  it("a bullet fired while the player is 4 carries power 4", () => {
+    const bullet = spawnBullet(4, 1, 0, 0, 0);
+    expect(bullet.value).toBe(4);
+    expect(bullet.spawnValue).toBe(4);
+  });
+
+  it("spawnBullet(8, ...) produces a bullet with power equal to the player's current value (8)", () => {
+    const bullet = spawnBullet(8, 1, 0, 0, 0);
+    expect(bullet.value).toBe(8);
+    expect(bullet.spawnValue).toBe(8);
+  });
+
+  it("a bullet fired later, once the player has grown, carries the bigger value", () => {
+    const bullet = spawnBullet(96, 1, 3, 0, 7);
+    expect(bullet.value).toBe(96);
+  });
+});
+
+describe("applyProjectileModifier: the brief's literal type/value modifier shape", () => {
+  it("add: 8 + 4 = 12", () => {
+    const mod: ProjectileModifier = { type: "add", value: 4 };
+    expect(applyProjectileModifier(8, mod)).toBe(12);
+  });
+
+  it("multiply: 8 x 2 = 16", () => {
+    const mod: ProjectileModifier = { type: "multiply", value: 2 };
+    expect(applyProjectileModifier(8, mod)).toBe(16);
+  });
+
+  it("subtract: 8 - 10 floors at 1, not 0 or negative", () => {
+    const mod: ProjectileModifier = { type: "subtract", value: 10 };
+    expect(applyProjectileModifier(8, mod)).toBe(1);
+  });
+
+  it("divide: floor(9 / 2) = 4", () => {
+    const mod: ProjectileModifier = { type: "divide", value: 2 };
+    expect(applyProjectileModifier(9, mod)).toBe(4);
+  });
+});
+
+describe("applyRateBoost: RATE+ speeds up fire rate, floored so it can't run away", () => {
+  it("shaves RATE_BOOST_STEP off the current interval", () => {
+    expect(applyRateBoost(0.75)).toBeCloseTo(0.66);
+  });
+
+  it("never drops the interval below MIN_FIRE_INTERVAL, however many times it's applied", () => {
+    let interval = BULLET_FIRE_INTERVAL;
+    for (let i = 0; i < 20; i++) interval = applyRateBoost(interval);
+    expect(interval).toBe(MIN_FIRE_INTERVAL);
   });
 });
 
 describe("resolveWallHit: a digit bullet chipping a wall", () => {
   it("subtracts the bullet's value from the wall's remaining hp", () => {
     expect(resolveWallHit(10, 4)).toBe(6);
+    expect(resolveWallHit(20, 8)).toBe(12);
+  });
+
+  it("resolveWallHit(24, 8) leaves 16 remaining", () => {
+    expect(resolveWallHit(24, 8)).toBe(16);
   });
 
   it("floors at zero rather than going negative", () => {
@@ -127,22 +224,29 @@ describe("resolveWallHit: a digit bullet chipping a wall", () => {
   });
 });
 
+describe("isWallDestroyed: the single check the renderer and tests both use", () => {
+  it("a wall chipped down to exactly 0 is destroyed", () => {
+    expect(isWallDestroyed(resolveWallHit(8, 8))).toBe(true);
+  });
+
+  it("a wall with hp remaining is not destroyed", () => {
+    expect(isWallDestroyed(resolveWallHit(20, 8))).toBe(false);
+  });
+});
+
 describe("step(): bullets chip walls ahead of the player", () => {
-  it("a bullet that grows through a +4 zone then hits a wall reduces that wall's hp", () => {
-    // A minimal two-obstacle track segment. BULLET_SPEED is fast enough
-    // that within a couple of seconds the auto-fired bullet has already
-    // crossed the zone and reached the wall well before the (much slower)
-    // player does.
+  it("bullets fired while in lane 1, boosted by the free ×2 gate, chip the first wall (24) before the player arrives", () => {
+    // BULLET_SPEED is fast enough that, staying in lane 1 the whole way, the
+    // auto-fired bullets reach the first wall (atUnits 1.7, value 24) well
+    // before the (much slower) player's own worldX does.
     let state = createInitialState();
     state = { ...state, status: "playing", lane: 1, laneX: 1, laneFrom: 1 };
     const dt = 1 / 60;
-    for (let i = 0; i < 90 && state.worldX < 1.5; i++) {
+    for (let i = 0; i < 200 && state.worldX < 1.7; i++) {
       state = step(state, dt, 1);
     }
-    // The player hasn't reached the wall (at atUnits 1.53) yet, but a bullet
-    // should have: the wall's live hp must be lower than its authored value.
-    const wallIndex = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.atUnits === 1.53);
-    expect(state.wallHp[wallIndex]).toBeLessThan(2);
+    const wallIndex = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.atUnits === 1.7);
+    expect(state.wallHp[wallIndex]).toBeLessThan(24);
   });
 
   it("a wall chipped down to 0 (the effective obstacle step() builds from wallHp) lets even a very weak player through", () => {
@@ -152,6 +256,45 @@ describe("step(): bullets chip walls ahead of the player", () => {
     const choppedWall: Wall = { type: "wall", atUnits: 0, lane: 1, value: 0 };
     const next = resolveCollision(stateInLane(1, 0.5), choppedWall);
     expect(next.status).toBe("playing");
+  });
+});
+
+describe("step(): a freshly-fired bullet always survives its own spawn frame", () => {
+  // Regression test for "有时子弹发射不出去": a bullet used to be advanced and
+  // resolved against obstacles in the very same step() call it was spawned
+  // in, so a bullet fired just as the player reached a wall/zone could be
+  // created and consumed before it was ever added to a rendered frame. Fixed
+  // by only running the move+resolve loop over bullets that existed at the
+  // start of the frame — freshly-fired bullets are pushed straight into
+  // state.bullets untouched, so this asserts zero same-frame kills across a
+  // full run through the real level.
+  it("never resolves a newly-spawned bullet against a wall/zone before it appears in state.bullets", () => {
+    let state = createInitialState();
+    state = { ...state, status: "playing", lane: 1, laneX: 1, laneFrom: 1 };
+    const dt = 1 / 60;
+    let totalFired = 0;
+    let sameFrameKills = 0;
+    for (let i = 0; i < 3000 && state.status === "playing"; i++) {
+      const beforeNextId = state.nextBulletId;
+      const next = step(state, dt, 1);
+      totalFired += next.nextBulletId - beforeNextId;
+      for (let id = beforeNextId; id < next.nextBulletId; id++) {
+        if (!next.bullets.some((b) => b.id === id)) sameFrameKills++;
+      }
+      state = next;
+    }
+    expect(totalFired).toBeGreaterThan(0);
+    expect(sameFrameKills).toBe(0);
+  });
+
+  it("spawns a fresh bullet ahead of the player's own position, not on top of or behind it", () => {
+    let state = createInitialState();
+    state = { ...state, status: "playing", lane: 1, laneX: 1, laneFrom: 1, bulletTimer: 0 };
+    const next = step(state, 1 / 60, 1);
+    expect(next.bullets.length).toBeGreaterThan(0);
+    for (const bullet of next.bullets) {
+      expect(bullet.atUnits).toBeGreaterThan(next.worldX);
+    }
   });
 });
 
@@ -183,59 +326,89 @@ describe("a frozen round ignores further input", () => {
 describe("the hand-authored level, driven end to end through the real level data", () => {
   // Runs the actual OBSTACLES track (not a synthetic wall) at a fixed
   // timestep, choosing a lane at each decision point. This is the same check
-  // used to validate the level's balance before ever opening a browser.
-  function drivePath(laneAt: (worldX: number) => 0 | 1 | 2): GameState {
+  // used to validate the level's balance before ever opening a browser (see
+  // scripts/balance-sim.ts and the balance write-up in PROCESS.md).
+  function drivePath(laneAt: (state: GameState) => 0 | 1 | 2): GameState {
     let state = createInitialState();
     state = { ...state, status: "playing" };
     const dt = 1 / 60;
     for (let i = 0; i < 60 * 60 && state.status === "playing"; i++) {
-      state = step(state, dt, laneAt(state.worldX));
+      state = step(state, dt, laneAt(state));
     }
     return state;
   }
 
-  it("wins by collecting every visible bonus and choosing the beatable finish lane", () => {
-    const final = drivePath((worldX) => {
-      if (worldX < 2.55) return 1; // ride the teaching pair and first wall
-      if (worldX < 3.53) return 2; // grab the +4, skip the -3
-      if (worldX < 7.14) return 1; // back to the middle for x2 and the mid walls
-      return 0; // finish: player value (16) only clears the lane-0 wall (16)
-    });
+  // Every non-finish wall lives in lane 1 (see game.ts's header comment: "a
+  // lane with no wall is always safe to pass through untouched") — so a
+  // "reasonable" run doesn't abandon lane 1 forever after the first side
+  // pickup, it detours out to a fork just long enough to grab the beneficial
+  // zone, then returns to lane 1 in time to face (or, via its own bullets,
+  // pre-chip) the next wall. These are the same fork windows validated by
+  // scripts/balance-sim.ts's "reasonable" driver.
+  const FORK_VISITS: { at: number; lane: 0 | 1 | 2 }[] = [
+    { at: 1.35, lane: 2 }, // grab +18, skip -8
+    { at: 2.1, lane: 2 }, // grab +14, skip -10
+    { at: 2.9, lane: 2 }, // grab +14, skip -12
+    { at: 3.7, lane: 2 }, // grab +40, skip -20
+    { at: 4.5, lane: 2 }, // grab x2, skip ÷2
+    { at: 5.3, lane: 2 }, // grab +30, skip -40
+    { at: 6.1, lane: 2 }, // grab +60, skip -50
+    { at: 6.9, lane: 2 }, // grab +100, skip -60
+    { at: 7.7, lane: 2 }, // grab x2, skip ÷2
+    { at: 8.1, lane: 2 }, // grab RATE+, skip -100
+    { at: 8.9, lane: 2 }, // grab +150, skip -120
+    { at: 9.3, lane: 2 }, // grab +50, skip ÷2
+  ];
+
+  function zigzag(
+    visits: { at: number; lane: 0 | 1 | 2 }[],
+    finishLane: 0 | 1 | 2 = 1,
+  ): (state: GameState) => 0 | 1 | 2 {
+    return (state) => {
+      const x = state.worldX;
+      if (x >= TRACK_LENGTH - 0.25) return finishLane;
+      for (const v of visits) {
+        if (x >= v.at - 0.3 && x <= v.at + 0.05) return v.lane;
+      }
+      return 1;
+    };
+  }
+
+  it("wins by collecting every visible bonus, dodging every danger zone, and beating the middle finish wall (850)", () => {
+    const final = drivePath(zigzag(FORK_VISITS, 1));
     expect(final.status).toBe("won");
   });
 
-  it("loses at one of the late walls by never leaving the middle lane (skips every side bonus)", () => {
-    const final = drivePath(() => 1);
+  it("loses (not instantly, and well short of the mid tier) by never leaving the middle lane and skipping every bonus", () => {
+    const final = drivePath((state) => 1);
     expect(final.status).toBe("lost");
-    // The player's own auto-fired bullets chip away at wall10/wall14 along
-    // the way (a side effect of always firing down your own lane), so
-    // exactly which of the two lets 8 through and which doesn't can shift —
-    // but skipping every side zone still isn't enough value to survive to
-    // the finish gauntlet.
-    expect(final.worldX).toBeLessThan(7.31);
+    // Clears the very first wall (24 at 1.7) via the free ×2 gate plus
+    // bullet chip alone — this isn't a first-wall instant-death build — but
+    // dies in the teaching tier, well before ever reaching a mid-tier wall.
+    expect(final.worldX).toBeGreaterThan(1.7);
+    expect(final.worldX).toBeLessThan(4.1);
   });
 
-  it("loses after taking the danger zone at the fork", () => {
-    const final = drivePath((worldX) => {
-      if (worldX < 2.55) return 1;
-      if (worldX < 3.53) return 0; // takes the -3 instead of the +4
-      return 1;
-    });
-    expect(final.status).toBe("lost");
+  it("a run that misses one or two later buffs (a realistic first attempt) still wins", () => {
+    const missOne = drivePath(zigzag(FORK_VISITS.filter((v) => v.at !== 8.9), 1));
+    expect(missOne.status).toBe("won");
+
+    const missTwo = drivePath(zigzag(FORK_VISITS.filter((v) => v.at !== 8.9 && v.at !== 6.9), 1));
+    expect(missTwo.status).toBe("won");
   });
 
-  it("a clean run stays within the tightened pacing target", () => {
+  it("a clean run stays within the pacing target", () => {
     let state = createInitialState();
     state = { ...state, status: "playing" };
     const dt = 1 / 60;
     let seconds = 0;
+    const laneAt = zigzag(FORK_VISITS, 1);
     for (; state.status === "playing" && seconds < 90; seconds += dt) {
-      const lane = state.worldX < 2.55 ? 1 : state.worldX < 3.53 ? 2 : state.worldX < 7.14 ? 1 : 0;
-      state = step(state, dt, lane);
+      state = step(state, dt, laneAt(state));
     }
     expect(state.status).toBe("won");
-    expect(seconds).toBeGreaterThan(12);
-    expect(seconds).toBeLessThan(40);
+    expect(seconds).toBeGreaterThan(10);
+    expect(seconds).toBeLessThan(30);
   });
 });
 
