@@ -1,70 +1,79 @@
 # Process overview
 
-<!-- TEMPLATE: this file is a shape to fill in, not a form. Replace everything
-     in it with your own overview, and delete this comment — `pnpm
-     check:evidence` will remind you if it's still here. -->
-
-A reading-guide to how the work came together --- a map to your process, not an
-essay about it. Markers read this file and follow its citations; they don't
-trawl the repo for evidence you didn't point at, so if a moment mattered, cite
-it.
-
-This file is the shape; the course site's
-[assessment page](https://comp.anu.edu.au/courses/comp4020-agentic-coding-studio/topics/assessment/#what-you-submit)
-is the requirement, and its
-[word counts](https://comp.anu.edu.au/courses/comp4020-agentic-coding-studio/topics/assessment/#word-counts)
-cover every deliverable.
-
 ## What I built
 
-One paragraph: the thing, and the idea behind it.
+**Threshold**: a one-screen gravity-flip corridor. A ball rides one of two
+rails scrolling left to right; the only input is a tap/click/spacebar, which
+flips it to the other rail. Spikes jut from one rail at a time — touch one on
+the rail it's attached to and you lose; be on the other rail when it passes and
+you're fine. Reach the glowing gate at the end and you win. One mechanic, one
+rule, nothing else to learn.
 
 ## The moments that mattered
 
-Three or four for an assignment; fewer is fine for a weekly prototype. Keep the
-list short so each moment has room to do all four jobs:
+1. **Choosing the mechanic before writing any code.** The brief's hard
+   constraint — a stranger must find the first move within 10 seconds, with
+   zero tutorial — ruled out anything needing an explained goal (score
+   attack, multi-key controls, an inventory). A single binary input with a
+   single failure mode (gravity-flip / "Impossible Game"-style) was the
+   smallest thing that could still be lost and still be won. I split the
+   rules into a pure, DOM-free `game.ts` from the start specifically so the
+   one required automated test could drive real game logic without mocking a
+   canvas — a structural decision made before the first line of gameplay
+   code, not a refactor after the fact.
+   [`324e909`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/324e909)
 
-1. **what happened** --- the problem, or the thing that went wrong
-2. **what you did instead of the obvious thing** --- the call you made, and why
-   it beat the obvious one
-3. **how you knew it was right** --- the check you ran, the viewport you looked
-   at, what you read before accepting the diff
-4. **the citation** --- a commit or commit range, a `CLAUDE.md` change, a check
-   that went from red to green, a prompt paired with the commit it produced
+2. **Validating the level analytically before trusting a screenshot.**
+   Rather than tune obstacle spacing by eye and hope it was fair, I wrote a
+   standalone Node script that imports `game.ts`'s own `step()` and drives it
+   with a lookahead bot, to check the hand-authored track was actually
+   winnable and to measure how much reaction lead a real player needs. That
+   surfaced the numbers I used to judge the design: a clean run takes ~23
+   seconds, and as little as 0.16s of anticipation is enough to clear every
+   spike — both comfortably inside the "finishable in 5 minutes" and "still
+   has real stakes" requirements. I checked this before playtesting in a
+   browser at all, so the in-browser session was verifying presentation, not
+   discovering whether the level was possible.
+   [`324e909`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/324e909)
 
-Jobs 2 and 3 are the ones the repo can't tell a reader on its own, so they're
-where the marks are. The strongest moments are the ones where a correction
-landed in the **harness** --- the standards and checks your work has to satisfy
---- rather than in a retry: a rule added to `CLAUDE.md`, a check wired up, an
-attempt thrown away. Retrying until it passes is the routine case, and changing
-what the work runs against is the skilled one.
+3. **What actually playing the finished game caught, that reading the code
+   didn't.** I built the site, served it with `vite preview`, and drove real
+   Chromium at both marking viewports (1920×1080 and 390×844) with
+   Playwright — not to unit-test, but to *look at the opening frame the way a
+   stranger would*. The screenshot showed a lone ball on a rail and nothing
+   else: the first spike was authored at 1.35 screens out, which is
+   mathematically off-canvas while the world is frozen at rest (only ~0.84
+   screens of world are visible from the ball's fixed screen position). The
+   number looked fine in `game.ts`; it only failed as a *screen*. I shifted
+   the whole track 0.8 screens earlier so the first spike sits inside the
+   canvas, on the ball's own rail, before any input — re-ran the same
+   screenshots to confirm it now reads immediately in both viewports, then
+   committed the fix separately from the original implementation so it's
+   traceable as its own decision.
+   [`9e2a0c2`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/9e2a0c2)
 
-Cite each moment as a link whose text is the commit hash or range and whose
-target is this repo's commit or compare URL, so a reader clicks straight to the
-evidence:
+4. **Keeping the no-tutorial constraint as a design discipline, not an
+   afterthought.** Every piece of idle-screen motion — the ball's bob, the
+   pulsing ring, the drifting starfield — exists so the opening frame reads
+   as alive and interactive without a word of instruction, and every outcome
+   (win, loss) is communicated purely by a particle burst and a colour-tinted
+   flash, never text. I treated "no `<h1>` explaining how to play, no modal,
+   no README rules" as a constraint to design *around* from the first
+   commit, rather than a rule to check for at the end and strip out.
+   [`324e909`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/324e909)
 
-- one commit: [`a1b2c3d`](https://github.com/YOUR-ORG/YOUR-REPO/commit/a1b2c3d)
-- a range:
-  [`a1b2c3d...e4f5a6b`](https://github.com/YOUR-ORG/YOUR-REPO/compare/a1b2c3d...e4f5a6b)
+## Directing the AI collaboration
 
-To pair a prompt with the commit it produced, quote the prompt (curated, not a
-full transcript) next to the citation:
-
-> the prompt, verbatim
-
-Screenshots are welcome where one carries the verification better than a
-sentence does. Commit the file to this repo and link it with a **relative**
-path, which is what makes it render on GitHub: `![alt text](docs/before.png)`.
-Images don't count towards the word count and don't replace the citation.
-
-## Before you ship
-
-`pnpm check:evidence` verifies your citations resolve to real commits, that a
-reflection entry the marker reads is in `reflections/`, and that your
-`CLAUDE.md` is there --- before a marker ever opens the file. It checks that
-your map is traceable, not that it is good: the marker judges whether your
-small, deliberately chosen set of moments shows real judgement and reflection. A
-green check is not a substitute for that curation.
-
-Images aren't checked: unlike a citation whose SHA doesn't resolve, a broken
-image is visible the moment this file is rendered on GitHub.
+I set the constraints (one mechanic, no tutorial, resolution-independent
+tunables, pure-logic module for testability, real playtesting before calling
+it done) and the AI wrote the implementation against them. I grounded it by
+demanding evidence at each stage rather than trusting a description of the
+result: the analytical bot simulation before trusting the level was fair, and
+real Playwright screenshots at both marking viewports before trusting the
+opening frame read correctly — the latter directly caught the off-canvas
+spike bug that no amount of re-reading `game.ts` would have surfaced, because
+the bug was in the relationship between a number and a viewport, not in the
+number itself. I corrected the process once concretely: the first playtesting
+finding became a separate, clearly-labelled commit rather than being folded
+into the original implementation commit, so the repo's history shows the
+correction as a distinct, citable decision rather than an invisible edit.
