@@ -139,9 +139,9 @@ describe("step(): bullets chip walls ahead of the player", () => {
     for (let i = 0; i < 90 && state.worldX < 1.5; i++) {
       state = step(state, dt, 1);
     }
-    // The player hasn't reached the wall (at atUnits 1.8) yet, but a bullet
+    // The player hasn't reached the wall (at atUnits 1.53) yet, but a bullet
     // should have: the wall's live hp must be lower than its authored value.
-    const wallIndex = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.atUnits === 1.8);
+    const wallIndex = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.atUnits === 1.53);
     expect(state.wallHp[wallIndex]).toBeLessThan(2);
   });
 
@@ -196,9 +196,9 @@ describe("the hand-authored level, driven end to end through the real level data
 
   it("wins by collecting every visible bonus and choosing the beatable finish lane", () => {
     const final = drivePath((worldX) => {
-      if (worldX < 3.0) return 1; // ride the teaching pair and first wall
-      if (worldX < 4.15) return 2; // grab the +4, skip the -3
-      if (worldX < 8.4) return 1; // back to the middle for x2 and the mid walls
+      if (worldX < 2.55) return 1; // ride the teaching pair and first wall
+      if (worldX < 3.53) return 2; // grab the +4, skip the -3
+      if (worldX < 7.14) return 1; // back to the middle for x2 and the mid walls
       return 0; // finish: player value (16) only clears the lane-0 wall (16)
     });
     expect(final.status).toBe("won");
@@ -212,30 +212,30 @@ describe("the hand-authored level, driven end to end through the real level data
     // exactly which of the two lets 8 through and which doesn't can shift —
     // but skipping every side zone still isn't enough value to survive to
     // the finish gauntlet.
-    expect(final.worldX).toBeLessThan(8.6);
+    expect(final.worldX).toBeLessThan(7.31);
   });
 
   it("loses after taking the danger zone at the fork", () => {
     const final = drivePath((worldX) => {
-      if (worldX < 3.0) return 1;
-      if (worldX < 4.15) return 0; // takes the -3 instead of the +4
+      if (worldX < 2.55) return 1;
+      if (worldX < 3.53) return 0; // takes the -3 instead of the +4
       return 1;
     });
     expect(final.status).toBe("lost");
   });
 
-  it("a clean run stays within the 30-60 second target", () => {
+  it("a clean run stays within the tightened pacing target", () => {
     let state = createInitialState();
     state = { ...state, status: "playing" };
     const dt = 1 / 60;
     let seconds = 0;
     for (; state.status === "playing" && seconds < 90; seconds += dt) {
-      const lane = state.worldX < 3.0 ? 1 : state.worldX < 4.15 ? 2 : state.worldX < 8.4 ? 1 : 0;
+      const lane = state.worldX < 2.55 ? 1 : state.worldX < 3.53 ? 2 : state.worldX < 7.14 ? 1 : 0;
       state = step(state, dt, lane);
     }
     expect(state.status).toBe("won");
-    expect(seconds).toBeGreaterThan(20);
-    expect(seconds).toBeLessThan(60);
+    expect(seconds).toBeGreaterThan(12);
+    expect(seconds).toBeLessThan(40);
   });
 });
 

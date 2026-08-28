@@ -113,11 +113,13 @@ export interface CanvasSize {
 export const LANES = 3;
 export const PLAYER_START_VALUE = 2;
 export const LANE_ANIM_DURATION = 0.22; // seconds for a lane-change slide
-// Raised ~23% from the original 0.26/0.36 after a playtest read the original
-// pace as too sedate for a "run" — see PROCESS.md for the before/after.
-export const BASE_SPEED = 0.32; // track units/sec at the start
-export const MAX_SPEED = 0.44; // track units/sec at the finish
-export const TRACK_LENGTH = 9.0; // track units to the finish gauntlet
+// Raised again (~30% on top of the prior 0.32/0.44 pass, track compressed
+// ~15%) after the reference-image playtest read the run as still too sedate
+// next to the "number gun runner" games it was meant to match — see
+// PROCESS.md for the before/after.
+export const BASE_SPEED = 0.42; // track units/sec at the start
+export const MAX_SPEED = 0.57; // track units/sec at the finish
+export const TRACK_LENGTH = 7.65; // track units to the finish gauntlet
 /** Half-width, in track units, of the window in which an obstacle resolves. */
 export const HIT_HALF = 0.12;
 
@@ -154,23 +156,23 @@ export const BULLET_MAX_REACH = TRACK_LENGTH + 0.5;
 //    Whichever lane you're in when you arrive is the number you must beat —
 //    smash through it and you win; anything else is a crash.
 export const OBSTACLES: readonly Obstacle[] = [
-  { type: "zone", atUnits: 0.4, lane: 1, kind: "add", value: 1 },
-  { type: "zone", atUnits: 1.05, lane: 1, kind: "add", value: 1 },
-  { type: "wall", atUnits: 1.8, lane: 1, value: 2 },
+  { type: "zone", atUnits: 0.34, lane: 1, kind: "add", value: 1 },
+  { type: "zone", atUnits: 0.89, lane: 1, kind: "add", value: 1 },
+  { type: "wall", atUnits: 1.53, lane: 1, value: 2 },
 
-  { type: "zone", atUnits: 3.2, lane: 0, kind: "add", value: -3 },
-  { type: "zone", atUnits: 3.2, lane: 2, kind: "add", value: 4 },
+  { type: "zone", atUnits: 2.72, lane: 0, kind: "add", value: -3 },
+  { type: "zone", atUnits: 2.72, lane: 2, kind: "add", value: 4 },
 
-  { type: "zone", atUnits: 4.3, lane: 1, kind: "mul", value: 2 },
-  { type: "wall", atUnits: 5.1, lane: 1, value: 6 },
+  { type: "zone", atUnits: 3.66, lane: 1, kind: "mul", value: 2 },
+  { type: "wall", atUnits: 4.34, lane: 1, value: 6 },
 
-  { type: "zone", atUnits: 6.2, lane: 2, kind: "add", value: 5 },
-  { type: "wall", atUnits: 7.0, lane: 1, value: 10 },
-  { type: "wall", atUnits: 7.8, lane: 1, value: 14 },
+  { type: "zone", atUnits: 5.27, lane: 2, kind: "add", value: 5 },
+  { type: "wall", atUnits: 5.95, lane: 1, value: 10 },
+  { type: "wall", atUnits: 6.63, lane: 1, value: 14 },
 
-  { type: "wall", atUnits: 8.6, lane: 0, value: 16, isFinish: true },
-  { type: "wall", atUnits: 8.6, lane: 1, value: 32, isFinish: true },
-  { type: "wall", atUnits: 8.6, lane: 2, value: 64, isFinish: true },
+  { type: "wall", atUnits: 7.31, lane: 0, value: 16, isFinish: true },
+  { type: "wall", atUnits: 7.31, lane: 1, value: 32, isFinish: true },
+  { type: "wall", atUnits: 7.31, lane: 2, value: 64, isFinish: true },
 ];
 
 function clamp(n: number, lo: number, hi: number): number {
