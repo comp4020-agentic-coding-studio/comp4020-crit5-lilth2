@@ -1,5 +1,5 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 html,
@@ -10,7 +10,7 @@ body {
 
 body {
   font-family: system-ui, sans-serif;
-  background: #04060c;
+  background: #bfe3ff;
   overflow: hidden;
 }
 
@@ -23,7 +23,7 @@ header {
 }
 
 nav a {
-  color: rgba(210, 220, 240, 0.35);
+  color: rgba(20, 40, 70, 0.35);
   font-size: 0.75rem;
   text-decoration: none;
   letter-spacing: 0.03em;
@@ -31,7 +31,7 @@ nav a {
 
 nav a:hover,
 nav a:focus-visible {
-  color: rgba(210, 220, 240, 0.75);
+  color: rgba(20, 40, 70, 0.75);
 }
 
 main {
@@ -49,7 +49,7 @@ main {
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(210, 220, 240, 0.4);
+  color: rgba(20, 40, 70, 0.4);
 }
 
 .stage {
