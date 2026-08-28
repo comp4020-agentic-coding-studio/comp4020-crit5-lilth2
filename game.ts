@@ -1,37 +1,106 @@
-// Pure game logic for THRESHOLD: no DOM, no canvas, no timers. main.ts wraps
-// this in a render/input loop; spec/game.test.ts drives it directly.
+// Pure game logic for DIGIT CANNON RUN: no DOM, no canvas, no timers. main.ts
+// wraps this in a render/input loop; spec/game.test.ts drives it directly.
 //
-// The one mechanic: flip which rail the ball rides (top or bottom). A spike
-// juts from whichever rail it's attached to, so the ball only survives it by
-// being on the *other* rail when it passes. Reaching the end of the track
-// wins; touching a spike loses. Nothing else.
+// The one rule: your current number vs. the number on the wall in front of
+// you. Big enough (>=) and you smash through and keep going; not big enough
+// and you crash — game over. A lane with no wall is always safe to pass
+// through untouched. Everything else (the lane-runner shell, the finish
+// gauntlet, the difficulty ramp) is built on that single comparison, repeated
+// with bigger numbers.
+//
+// The player auto-fires digit bullets down their current lane. A "zone" is a
+// floating +N/×N/-N gate: it modifies playerValue if the player is in its
+// lane when they reach it (exactly like the old item pickups did), and it
+// *also* modifies any bullet that flies through it first — so a wall can
+// already be partially chipped down (via wallHp, tracked per-wall alongside
+// the static OBSTACLES data) before the player themselves ever arrives at it.
+// The win/loss comparison itself never changes: canBreakWall(playerValue,
+// wallValue) still decides everything, it's just compared against the wall's
+// current (possibly bullet-damaged) value instead of always its full one.
 
-export type Side = "top" | "bottom";
-export type Status = "ready" | "playing" | "won" | "lost";
+export type Lane = 0 | 1 | 2;
+export type Status = "playing" | "won" | "lost";
+export type ItemKind = "add" | "mul";
 
-export interface Obstacle {
-  /** World position, in screen-widths travelled from the start. */
-  atScreens: number;
-  /** Which rail the spike juts from — the ball must be on the other one. */
-  side: Side;
+export interface NumberItem {
+  type: "item";
+  /** World position, in track units travelled from the start. */
+  atUnits: number;
+  lane: Lane;
+  kind: ItemKind;
+  /** add: signed delta (e.g. +1, -3). mul: factor (e.g. 2 for x2). */
+  value: number;
 }
 
-export interface Ball {
-  /** The rail the ball is flipping toward (or already resting on). */
-  target: Side;
-  /** Current vertical position, as a fraction of canvas height (0 = top of canvas). */
-  y: number;
-  /** y the flip animation started from. */
-  animFrom: number;
-  /** Seconds elapsed since the current flip animation began. */
-  animT: number;
+export interface Wall {
+  type: "wall";
+  atUnits: number;
+  lane: Lane;
+  /** The number you must meet or beat to smash through instead of crashing. */
+  value: number;
+  /** The finish gauntlet: breaking one of these wins the round outright. */
+  isFinish?: boolean;
+}
+
+/**
+ * A floating operator gate: +N / ×N / -N (a negative "add"). Affects the
+ * player if they're in its lane when they arrive, and affects any digit
+ * bullet that flies through it in that lane first — the mechanic that lets a
+ * bullet arrive at a wall already boosted (or weakened) by what it passed
+ * through on the way.
+ */
+export interface Zone {
+  type: "zone";
+  atUnits: number;
+  lane: Lane;
+  kind: ItemKind;
+  value: number;
+}
+
+export type Obstacle = NumberItem | Wall | Zone;
+
+/** A digit bullet, auto-fired down the lane the player was in at the moment
+ * it was fired. Travels forward through the same track-unit space obstacles
+ * live in, faster than the world scrolls, so it always reaches a given
+ * obstacle before the player's own position does. */
+export interface Bullet {
+  lane: Lane;
+  value: number;
+  atUnits: number;
+  /** Mirrors GameState.resolvedUpTo, but per-bullet: which OBSTACLES index
+   *  this bullet has already resolved past, so it doesn't re-trigger a zone
+   *  or wall it's still within the hit window of. */
+  resolvedUpTo: number;
 }
 
 export interface GameState {
   status: Status;
-  /** Distance travelled, in screen-widths. */
+  /** Distance travelled, in track units. */
   worldX: number;
-  ball: Ball;
+  playerValue: number;
+  /** The lane the player is steering toward (or already resting in). */
+  lane: Lane;
+  /** Current animated lane position, 0..2 (fractional mid-slide). */
+  laneX: number;
+  /** laneX the current slide animation started from. */
+  laneFrom: number;
+  /** Seconds elapsed since the current slide animation began. */
+  laneAnimT: number;
+  /**
+   * How many obstacles (in track order) have already been resolved. worldX
+   * only ever increases, so once an obstacle's position has been reached it
+   * resolves exactly once — without this, a pickup the player lingers next
+   * to (or simply travels slowly past) would re-apply itself every frame it
+   * stays inside the hit window.
+   */
+  resolvedUpTo: number;
+  /** Live digit bullets, auto-fired down the player's current lane. */
+  bullets: Bullet[];
+  /** Seconds until the next auto-fired bullet. */
+  bulletTimer: number;
+  /** Current (possibly bullet-damaged) hp for every OBSTACLES entry, indexed
+   *  the same way; only meaningful where OBSTACLES[i].type === "wall". */
+  wallHp: number[];
 }
 
 export interface CanvasSize {
@@ -39,50 +108,70 @@ export interface CanvasSize {
   height: number;
 }
 
-// --- Tunables, all resolution-independent (fractions of canvas W/H, or of
-// screen-widths for horizontal distance) so the track plays the same at a
-// phone portrait viewport and a desktop one. ---
-export const TRACK_LENGTH = 15.8; // screens to the finish gate
-export const BASE_SPEED = 0.5; // screens/sec at the start
-export const MAX_SPEED = 0.92; // screens/sec at the finish
-export const FLIP_DURATION = 0.16; // seconds for the flip animation
-export const BALL_X = 0.16; // fixed screen-x, fraction of canvas width
-export const BALL_RADIUS = 0.032; // fraction of canvas height
-export const TOP_Y = 0.24; // top rail, fraction of canvas height
-export const BOTTOM_Y = 0.76; // bottom rail, fraction of canvas height
-export const SPIKE_REACH = 0.3; // how far a spike protrudes from its rail (fraction of canvas height)
-export const SPIKE_WIDTH = 0.05; // fraction of canvas width
+// --- Tunables, all in resolution-independent track units / seconds, so the
+// level plays out identically regardless of canvas size. ---
+export const LANES = 3;
+export const PLAYER_START_VALUE = 2;
+export const LANE_ANIM_DURATION = 0.22; // seconds for a lane-change slide
+// Raised ~23% from the original 0.26/0.36 after a playtest read the original
+// pace as too sedate for a "run" — see PROCESS.md for the before/after.
+export const BASE_SPEED = 0.32; // track units/sec at the start
+export const MAX_SPEED = 0.44; // track units/sec at the finish
+export const TRACK_LENGTH = 9.0; // track units to the finish gauntlet
+/** Half-width, in track units, of the window in which an obstacle resolves. */
+export const HIT_HALF = 0.12;
 
-// Hand-authored track: a short teaching pair, then patterns that get denser
-// and faster, one rapid double, a breather, and a tight run to the gate.
+/** Track units/sec a digit bullet travels — deliberately several times
+ *  faster than MAX_SPEED, so a bullet fired this frame always reaches any
+ *  obstacle ahead before the player's own worldX does. */
+export const BULLET_SPEED = 3.0;
+/** Seconds between auto-fired bullets. */
+export const BULLET_FIRE_INTERVAL = 0.45;
+/** Every bullet starts at this value; zones grow/shrink it from there. */
+export const BULLET_BASE_VALUE = 1;
+/** Bullets past this point are off the visible track and despawn. */
+export const BULLET_MAX_REACH = TRACK_LENGTH + 0.5;
+
+// Hand-authored level, in four segments plus a finish gauntlet. Every
+// +N/×N/-N moment is now a "zone" (a floating gate), not a touch-only item:
+// a zone modifies the player if they're in its lane when they arrive, *and*
+// modifies any digit bullet that flies through it first, so a wall can
+// already be chipped down before the player themselves gets there.
 //
-// The first spike sits at 0.55 screens — close enough that it's inside the
-// canvas (BALL_X + atScreens < 1) while the ball is still frozen at worldX 0,
-// so it's visible at rest, not just once the world starts scrolling. Playtesting
-// caught this: the original first spike (1.35 screens out) rendered entirely
-// off-canvas until the world had already started moving, so the opening frame
-// showed a lone ball with nothing to react to.
+// 1. Teaching pair: two +1 zones dead ahead in the player's own starting
+//    lane, then a wall (value 2) obviously smaller than the number the
+//    player is now carrying — the first "I'm bigger, I can break this"
+//    moment. The opening zone also grows the very first auto-fired bullet
+//    on screen, so a stranger sees a bullet visibly get bigger before it
+//    chips the first wall, without a word of explanation.
+// 2. First fork: a red -3 zone sits off to one side, a green +4 zone off the
+//    other; the middle lane stays clear, so touching the danger is a
+//    choice, not a trap.
+// 3. A ×2 zone followed by a heavier wall, escalating the same rule.
+// 4. A bonus +5 zone, then two consecutive walls close together, needing
+//    value banked in advance.
+// 5. Finish gauntlet: three walls side by side, one per lane (16 / 32 / 64).
+//    Whichever lane you're in when you arrive is the number you must beat —
+//    smash through it and you win; anything else is a crash.
 export const OBSTACLES: readonly Obstacle[] = [
-  { atScreens: 0.55, side: "bottom" },
-  { atScreens: 1.75, side: "top" },
-  { atScreens: 3.05, side: "bottom" },
-  { atScreens: 4.05, side: "top" },
-  { atScreens: 5.2, side: "bottom" },
-  { atScreens: 5.55, side: "top" }, // quick double
-  { atScreens: 6.8, side: "bottom" },
-  { atScreens: 8.1, side: "top" },
-  { atScreens: 9.8, side: "bottom" }, // breather before this
-  { atScreens: 11.1, side: "top" },
-  { atScreens: 11.4, side: "bottom" }, // quick double
-  { atScreens: 12.5, side: "top" },
-  { atScreens: 13.15, side: "bottom" },
-  { atScreens: 13.8, side: "top" },
-  { atScreens: 14.45, side: "bottom" },
-];
+  { type: "zone", atUnits: 0.4, lane: 1, kind: "add", value: 1 },
+  { type: "zone", atUnits: 1.05, lane: 1, kind: "add", value: 1 },
+  { type: "wall", atUnits: 1.8, lane: 1, value: 2 },
 
-function railY(side: Side): number {
-  return side === "top" ? TOP_Y : BOTTOM_Y;
-}
+  { type: "zone", atUnits: 3.2, lane: 0, kind: "add", value: -3 },
+  { type: "zone", atUnits: 3.2, lane: 2, kind: "add", value: 4 },
+
+  { type: "zone", atUnits: 4.3, lane: 1, kind: "mul", value: 2 },
+  { type: "wall", atUnits: 5.1, lane: 1, value: 6 },
+
+  { type: "zone", atUnits: 6.2, lane: 2, kind: "add", value: 5 },
+  { type: "wall", atUnits: 7.0, lane: 1, value: 10 },
+  { type: "wall", atUnits: 7.8, lane: 1, value: 14 },
+
+  { type: "wall", atUnits: 8.6, lane: 0, value: 16, isFinish: true },
+  { type: "wall", atUnits: 8.6, lane: 1, value: 32, isFinish: true },
+  { type: "wall", atUnits: 8.6, lane: 2, value: 64, isFinish: true },
+];
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -98,94 +187,175 @@ function speedAt(progress: number): number {
 
 export function createInitialState(): GameState {
   return {
-    status: "ready",
+    status: "playing",
     worldX: 0,
-    ball: { target: "bottom", y: BOTTOM_Y, animFrom: BOTTOM_Y, animT: FLIP_DURATION },
+    playerValue: PLAYER_START_VALUE,
+    lane: 1,
+    laneX: 1,
+    laneFrom: 1,
+    laneAnimT: LANE_ANIM_DURATION,
+    resolvedUpTo: 0,
+    bullets: [],
+    bulletTimer: 0.15,
+    wallHp: OBSTACLES.map((ob) => (ob.type === "wall" ? ob.value : 0)),
   };
 }
 
-/** Circle-vs-axis-aligned-rect overlap test, all args in the same pixel space. */
-export function circleHitsRect(
-  cx: number,
-  cy: number,
-  r: number,
-  rx: number,
-  ry: number,
-  rw: number,
-  rh: number,
-): boolean {
-  const nearestX = clamp(cx, rx, rx + rw);
-  const nearestY = clamp(cy, ry, ry + rh);
-  const dx = cx - nearestX;
-  const dy = cy - nearestY;
-  return dx * dx + dy * dy < r * r;
+/** Applies a pickup's effect to the player's number. Pure, no side effects. */
+export function collectItem(playerValue: number, item: NumberItem): number {
+  return item.kind === "mul" ? playerValue * item.value : playerValue + item.value;
 }
 
-/** The obstacle's hitbox in pixels, for a given world scroll and canvas size. */
-export function obstacleRect(ob: Obstacle, worldX: number, size: CanvasSize) {
-  const centerX = (BALL_X + (ob.atScreens - worldX)) * size.width;
-  const w = SPIKE_WIDTH * size.width;
-  const reach = SPIKE_REACH * size.height;
-  const y = ob.side === "top" ? 0 : size.height - reach;
-  return { x: centerX - w / 2, y, width: w, height: reach };
+/** Applies a zone's effect to a digit bullet flying through it. */
+export function applyModifierToBullet(bulletValue: number, zone: Zone): number {
+  return zone.kind === "mul" ? bulletValue * zone.value : bulletValue + zone.value;
 }
 
-/** True if the ball (at its current rendered position) is touching this obstacle. */
-export function ballHitsObstacle(ball: Ball, ob: Obstacle, worldX: number, size: CanvasSize): boolean {
-  const rect = obstacleRect(ob, worldX, size);
-  // Cheap reject: obstacles more than ~1.5 screens away can't overlap the ball.
-  if (Math.abs(ob.atScreens - worldX) > 1.5) return false;
-  return circleHitsRect(
-    BALL_X * size.width,
-    ball.y * size.height,
-    BALL_RADIUS * size.height,
-    rect.x,
-    rect.y,
-    rect.width,
-    rect.height,
-  );
+/** Applies a zone's effect to the player's number (same shape as collectItem). */
+export function applyModifierToPlayer(playerValue: number, zone: Zone): number {
+  return zone.kind === "mul" ? playerValue * zone.value : playerValue + zone.value;
+}
+
+/** A bullet chipping a wall: the wall's hp drops by the bullet's value, floored at 0. */
+export function resolveWallHit(wallValue: number, bulletValue: number): number {
+  return Math.max(0, wallValue - bulletValue);
+}
+
+/** The one rule the whole game rests on: big enough number, or you crash. */
+export function canBreakWall(playerValue: number, wallValue: number): boolean {
+  return playerValue >= wallValue;
+}
+
+/** True if the world has scrolled far enough for this obstacle to resolve. */
+export function withinHitWindow(ob: Obstacle, worldX: number): boolean {
+  return Math.abs(ob.atUnits - worldX) <= HIT_HALF;
 }
 
 /**
- * Advance the simulation by `dt` seconds. `flip` is true on the frame the
- * player pressed/tapped/clicked. Pure: returns a new state, never mutates.
- * Won/lost states are frozen here — main.ts decides when to reset.
+ * Resolves one obstacle against the current state. An obstacle in a lane the
+ * player isn't in has no effect (it was safely dodged). Pure: returns a new
+ * state, never mutates the one it was given.
  */
-export function step(state: GameState, dt: number, flip: boolean, size: CanvasSize): GameState {
+export function resolveCollision(state: GameState, obstacle: Obstacle): GameState {
+  if (obstacle.lane !== state.lane) return state;
+
+  if (obstacle.type === "item") {
+    return { ...state, playerValue: collectItem(state.playerValue, obstacle) };
+  }
+
+  if (obstacle.type === "zone") {
+    return { ...state, playerValue: applyModifierToPlayer(state.playerValue, obstacle) };
+  }
+
+  if (canBreakWall(state.playerValue, obstacle.value)) {
+    return obstacle.isFinish ? { ...state, status: "won" } : state;
+  }
+  return { ...state, status: "lost" };
+}
+
+/**
+ * Checks for an end condition that isn't tied to a specific obstacle — here,
+ * a player number that's dropped to zero or below (too many negatives) can
+ * never beat any wall again, so the round is already over.
+ */
+export function checkEndCondition(state: GameState): Status {
+  if (state.status !== "playing") return state.status;
+  if (state.playerValue <= 0) return "lost";
+  return "playing";
+}
+
+/**
+ * Advance the simulation by `dt` seconds. `laneInput` is the lane the player
+ * currently wants to be in (or null for "no change requested"). Won/lost
+ * states are frozen here — main.ts decides when to reset.
+ */
+export function step(state: GameState, dt: number, laneInput: Lane | null): GameState {
   if (state.status === "won" || state.status === "lost") {
     return state;
   }
 
   let status = state.status;
-  let ball = state.ball;
+  let lane = state.lane;
+  let laneFrom = state.laneFrom;
+  let laneAnimT = state.laneAnimT;
 
-  if (flip) {
-    if (status === "ready") status = "playing";
-    const target: Side = ball.target === "bottom" ? "top" : "bottom";
-    ball = { ...ball, target, animFrom: ball.y, animT: 0 };
+  if (laneInput !== null && laneInput !== lane) {
+    laneFrom = state.laneX;
+    lane = laneInput;
+    laneAnimT = 0;
   }
 
-  const animT = Math.min(FLIP_DURATION, ball.animT + dt);
-  const eased = easeOutQuad(animT / FLIP_DURATION);
-  const y = ball.animFrom + (railY(ball.target) - ball.animFrom) * eased;
-  ball = { ...ball, animT, y };
+  laneAnimT = Math.min(LANE_ANIM_DURATION, laneAnimT + dt);
+  const eased = easeOutQuad(laneAnimT / LANE_ANIM_DURATION);
+  const laneX = laneFrom + (lane - laneFrom) * eased;
+
+  let working: GameState = { ...state, status, lane, laneX, laneFrom, laneAnimT };
 
   if (status !== "playing") {
-    return { ...state, ball, status };
+    return working;
   }
 
   const progress = state.worldX / TRACK_LENGTH;
   const worldX = state.worldX + speedAt(progress) * dt;
+  working = { ...working, worldX };
 
-  for (const ob of OBSTACLES) {
-    if (ballHitsObstacle(ball, ob, worldX, size)) {
-      return { ...state, ball, worldX, status: "lost" };
+  // --- Digit bullets: auto-fire down the player's current lane, then race
+  // ahead of the player through the same obstacle list, applying zone
+  // modifiers to themselves and chipping wallHp when they hit a wall — all
+  // before the player-obstacle loop below ever runs for this frame. ---
+  const wallHp = working.wallHp.slice();
+  let bulletTimer = working.bulletTimer - dt;
+  const firedBullets: Bullet[] = working.bullets.map((b) => ({ ...b }));
+  while (bulletTimer <= 0) {
+    firedBullets.push({
+      lane: working.lane,
+      value: BULLET_BASE_VALUE,
+      atUnits: worldX,
+      resolvedUpTo: working.resolvedUpTo,
+    });
+    bulletTimer += BULLET_FIRE_INTERVAL;
+  }
+
+  const survivingBullets: Bullet[] = [];
+  for (const fired of firedBullets) {
+    let bullet: Bullet = { ...fired, atUnits: fired.atUnits + BULLET_SPEED * dt };
+    let spent = false;
+    while (
+      bullet.resolvedUpTo < OBSTACLES.length &&
+      bullet.atUnits >= OBSTACLES[bullet.resolvedUpTo].atUnits
+    ) {
+      const ob = OBSTACLES[bullet.resolvedUpTo];
+      if (ob.lane === bullet.lane) {
+        if (ob.type === "zone") {
+          bullet = { ...bullet, value: applyModifierToBullet(bullet.value, ob) };
+        } else if (ob.type === "wall") {
+          wallHp[bullet.resolvedUpTo] = resolveWallHit(wallHp[bullet.resolvedUpTo], bullet.value);
+          spent = true;
+        }
+      }
+      bullet = { ...bullet, resolvedUpTo: bullet.resolvedUpTo + 1 };
+      if (spent) break;
+    }
+    if (!spent && bullet.atUnits <= BULLET_MAX_REACH) {
+      survivingBullets.push(bullet);
     }
   }
+  working = { ...working, wallHp, bulletTimer, bullets: survivingBullets };
 
-  if (worldX >= TRACK_LENGTH) {
-    return { ...state, ball, worldX: TRACK_LENGTH, status: "won" };
+  let resolvedUpTo = working.resolvedUpTo;
+  while (resolvedUpTo < OBSTACLES.length && worldX >= OBSTACLES[resolvedUpTo].atUnits) {
+    const ob = OBSTACLES[resolvedUpTo];
+    const effective: Obstacle = ob.type === "wall" ? { ...ob, value: wallHp[resolvedUpTo] } : ob;
+    working = resolveCollision(working, effective);
+    resolvedUpTo++;
+    if (working.status !== "playing") {
+      return { ...working, resolvedUpTo };
+    }
   }
+  working = { ...working, resolvedUpTo };
 
-  return { ...state, ball, worldX, status: "playing" };
+  const endStatus = checkEndCondition(working);
+  if (endStatus !== "playing") working = { ...working, status: endStatus };
+
+  return working;
 }
