@@ -2,78 +2,85 @@
 
 ## What I built
 
-**Threshold**: a one-screen gravity-flip corridor. A ball rides one of two
-rails scrolling left to right; the only input is a tap/click/spacebar, which
-flips it to the other rail. Spikes jut from one rail at a time — touch one on
-the rail it's attached to and you lose; be on the other rail when it passes and
-you're fine. Reach the glowing gate at the end and you win. One mechanic, one
-rule, nothing else to learn.
+**Digit Cannon Run**: a pseudo-3D lane runner where the player's identity
+literally is a number. You start at 2 and auto-fire digit bullets down your
+own lane. Road "zones" (+N, x2, -N) modify anything that touches them —
+bullets and player alike — and walls block a lane with a printed value: clear
+it if your number is at least as big, crash if it isn't. The twist the crit
+asked for is that your own bullets travel faster than you do, so they reach a
+zone or a wall first and can chip a wall's value down before you physically
+arrive — "shoot the gate open before you get there" is a real, guaranteed
+mechanic, not a lucky coincidence of timing.
 
 ## The moments that mattered
 
-1. **Choosing the mechanic before writing any code.** The brief's hard
-   constraint — a stranger must find the first move within 10 seconds, with
-   zero tutorial — ruled out anything needing an explained goal (score
-   attack, multi-key controls, an inventory). A single binary input with a
-   single failure mode (gravity-flip / "Impossible Game"-style) was the
-   smallest thing that could still be lost and still be won. I split the
-   rules into a pure, DOM-free `game.ts` from the start specifically so the
-   one required automated test could drive real game logic without mocking a
-   canvas — a structural decision made before the first line of gameplay
-   code, not a refactor after the fact.
-   [`324e909`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/324e909)
+1. **Making bullets real, testable state instead of a rendering flourish.**
+   The easy version of "bullets modify walls" is a visual trick with no
+   ground truth. Instead `GameState` gained a `bullets` array and a parallel
+   `wallHp` array, and a wall's live hp — not its authored value — is what
+   `canBreakWall` actually sees at the moment of collision. That let me keep
+   every existing collision test passing completely unmodified (the function
+   signatures never changed, only what `step()` hands them) while still
+   proving the new mechanic headlessly: a test drives the real level data,
+   asserts a bullet grown through a +4 zone reduces a specific wall's
+   `wallHp` below its authored value before the player has covered enough
+   ground to reach it.
+   [`5920fc1`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/5920fc1)
 
-2. **Validating the level analytically before trusting a screenshot.**
-   Rather than tune obstacle spacing by eye and hope it was fair, I wrote a
-   standalone Node script that imports `game.ts`'s own `step()` and drives it
-   with a lookahead bot, to check the hand-authored track was actually
-   winnable and to measure how much reaction lead a real player needs. That
-   surfaced the numbers I used to judge the design: a clean run takes ~23
-   seconds, and as little as 0.16s of anticipation is enough to clear every
-   spike — both comfortably inside the "finishable in 5 minutes" and "still
-   has real stakes" requirements. I checked this before playtesting in a
-   browser at all, so the in-browser session was verifying presentation, not
-   discovering whether the level was possible.
-   [`324e909`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/324e909)
+2. **Validating the level analytically before trusting a screenshot, again.**
+   Same discipline as last week: before opening a browser, a standalone
+   script imported `game.ts` directly and drove the real, hand-authored
+   `OBSTACLES` track at a fixed timestep along both the intended win path and
+   a "never leave the middle lane" loss path. That's what caught, on paper,
+   that the win path's final value (16) only barely clears the lane-0 finish
+   wall (16) *because* of bullet pre-damage along the way — if I'd trusted a
+   manual read of the numbers instead of running the actual `step()`
+   function, I'd have concluded the level was unwinnable and started
+   loosening it for the wrong reason.
 
-3. **What actually playing the finished game caught, that reading the code
-   didn't.** I built the site, served it with `vite preview`, and drove real
-   Chromium at both marking viewports (1920×1080 and 390×844) with
-   Playwright — not to unit-test, but to *look at the opening frame the way a
-   stranger would*. The screenshot showed a lone ball on a rail and nothing
-   else: the first spike was authored at 1.35 screens out, which is
-   mathematically off-canvas while the world is frozen at rest (only ~0.84
-   screens of world are visible from the ball's fixed screen position). The
-   number looked fine in `game.ts`; it only failed as a *screen*. I shifted
-   the whole track 0.8 screens earlier so the first spike sits inside the
-   canvas, on the ball's own rail, before any input — re-ran the same
-   screenshots to confirm it now reads immediately in both viewports, then
-   committed the fix separately from the original implementation so it's
-   traceable as its own decision.
-   [`9e2a0c2`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/9e2a0c2)
+3. **A Playwright screenshot pass exposed a payoff that wasn't there.**
+   I drove headless Chromium at both marking viewports through a full win and
+   a full loss, polling the game's exposed live state (`window.__state`)
+   frame-by-frame rather than guessing wall-clock delays — fixed delays kept
+   drifting every time I retuned pacing, since the exact second a run ends
+   depends on the speed curve. Once the screenshots reliably landed on the
+   real win/loss frame, they showed the actual bug: `drawPlayerDigit`
+   returned immediately the instant the round ended, so the one frame meant
+   to read as "you smashed through" or "you got crushed" showed only a
+   flash tint and the finish walls — no player, nothing to react to. Reading
+   `game.ts` would never have surfaced this; it only showed up by looking at
+   the rendered frame a marker actually sees. I made the digit hold for the
+   first ~500ms of the existing result-hold window with a punch reaction
+   (grows gold on a win, shrinks and shakes red on a loss) before fading, and
+   confirmed it against fresh screenshots at both viewports.
+   [`29516c0`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/29516c0)
 
-4. **Keeping the no-tutorial constraint as a design discipline, not an
-   afterthought.** Every piece of idle-screen motion — the ball's bob, the
-   pulsing ring, the drifting starfield — exists so the opening frame reads
-   as alive and interactive without a word of instruction, and every outcome
-   (win, loss) is communicated purely by a particle burst and a colour-tinted
-   flash, never text. I treated "no `<h1>` explaining how to play, no modal,
-   no README rules" as a constraint to design *around* from the first
-   commit, rather than a rule to check for at the end and strip out.
-   [`324e909`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/324e909)
+4. **Treating "the player IS the number" as a rendering constraint, not a
+   slogan.** The crit's core note was that the game didn't yet read as
+   "Digit Cannon Run" — a dark anonymous block firing plain dots doesn't say
+   anything about numbers. Every render pass this week was in service of
+   that: the player's own body is `state.playerValue` drawn as a bold glowing
+   digit, bullets show their live value on a small pill so a chipped wall is
+   visibly a subtraction happening in front of you, and zones render as
+   distinct translucent gates (not pickup-style rounded rects) labelled with
+   their operator so the three effects are readable without a word of
+   explanation.
+   [`f41b86f`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/f41b86f)
 
 ## Directing the AI collaboration
 
-I set the constraints (one mechanic, no tutorial, resolution-independent
-tunables, pure-logic module for testability, real playtesting before calling
-it done) and the AI wrote the implementation against them. I grounded it by
-demanding evidence at each stage rather than trusting a description of the
-result: the analytical bot simulation before trusting the level was fair, and
-real Playwright screenshots at both marking viewports before trusting the
-opening frame read correctly — the latter directly caught the off-canvas
-spike bug that no amount of re-reading `game.ts` would have surfaced, because
-the bug was in the relationship between a number and a viewport, not in the
-number itself. I corrected the process once concretely: the first playtesting
-finding became a separate, clearly-labelled commit rather than being folded
-into the original implementation commit, so the repo's history shows the
-correction as a distinct, citable decision rather than an invisible edit.
+I set the constraints this week (the player's identity must be the number
+itself, bullets must be real state that modifiers can act on rather than a
+rendering trick, walls must show live rather than static damage, and the pace
+needed to read faster) and directed verification at each stage rather than
+accepting a description of the result: an analytical script driving the real
+`step()` against the real level data before ever opening a browser, then a
+Playwright pass at both marking viewports polling the game's own exposed
+state to land screenshots on the real win/loss frame instead of a guessed
+one. That playtest pass is what caught the missing-player-at-the-payoff bug —
+the kind of thing that only exists in the gap between "the logic is correct"
+and "the screen a person looks at is correct," which is exactly the gap last
+week's reflection said I'd start treating as a required check rather than an
+afterthought. I held to that this week: the fix landed as its own commit,
+citable separately from the rendering pass that introduced the bug, so the
+correction is traceable rather than folded silently into the original change.

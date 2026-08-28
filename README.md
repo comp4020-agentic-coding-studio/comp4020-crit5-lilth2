@@ -1,7 +1,10 @@
-# Threshold
+# Digit Cannon Run
 
 A COMP4020 Crit 5 prototype: a static browser game built on plain
-HTML/CSS/TypeScript with Vite, deployed to GitHub Pages.
+HTML/CSS/TypeScript with Vite, deployed to GitHub Pages. You are a number.
+You auto-fire digit bullets down your lane; road zones (+N, x2, -N) grow or
+shrink anything that touches them, bullets included, and each wall blocks a
+lane until your number is big enough to break it.
 
 ## Quick start
 
