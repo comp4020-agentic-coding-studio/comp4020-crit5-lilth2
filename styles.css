@@ -10,8 +10,45 @@ body {
 
 body {
   font-family: system-ui, sans-serif;
-  background: #bfe3ff;
+  /* Neutral surround so a centered portrait frame reads as a phone screen
+     on wide/desktop viewports, per the reference games this build follows. */
+  background: #1b2230;
   overflow: hidden;
+}
+
+main {
+  position: relative;
+  height: 100dvh;
+  width: 100dvw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Desktop/wide viewports: a centered 9:16 "phone" frame, letterboxed to fit
+   whichever dimension is tighter. Narrow/mobile viewports: fill the real
+   screen edge to edge instead of forcing letterboxing on a device that's
+   already portrait. */
+.stage {
+  position: relative;
+  overflow: hidden;
+  background: #bfe3ff;
+}
+
+@media (min-width: 701px) {
+  .stage {
+    width: min(100dvw, calc(100dvh * 9 / 16));
+    height: min(100dvh, calc(100dvw * 16 / 9));
+    border-radius: 20px;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  }
+}
+
+@media (max-width: 700px) {
+  .stage {
+    width: 100dvw;
+    height: 100dvh;
+  }
 }
 
 header {
@@ -34,11 +71,6 @@ nav a:focus-visible {
   color: rgba(20, 40, 70, 0.75);
 }
 
-main {
-  position: relative;
-  height: 100%;
-}
-
 .title {
   position: absolute;
   top: 0.6rem;
@@ -50,11 +82,6 @@ main {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgba(20, 40, 70, 0.4);
-}
-
-.stage {
-  position: absolute;
-  inset: 0;
 }
 
 #game {

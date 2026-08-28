@@ -29,6 +29,12 @@ interface Particle {
   maxLife: number;
   color: string;
   r: number;
+  /** "circle" (default): a soft dot. "rect": a spinning confetti chip. "glyph":
+   *  a scattering fragment of an actual digit character, for wall-break hits. */
+  shape?: "circle" | "rect" | "glyph";
+  glyph?: string;
+  rot?: number;
+  vrot?: number;
 }
 
 /** A transient color/scale reaction on the player's digit body, set whenever
@@ -39,17 +45,28 @@ interface PlayerFx {
 }
 
 // --- Perspective tunables, all fractions of canvas W/H so the road looks the
-// same shape on a phone and a desktop. ---
-const HORIZON_Y = 0.3;
-const NEAR_Y = 0.9;
-const HORIZON_HALF_ROAD = 0.045;
-const NEAR_HALF_ROAD = 0.46;
+// same shape on a phone and a desktop. Retuned for the 9:16 portrait stage
+// (styles.css) so the track fills most of the frame vertically instead of
+// leaving a wide, empty landscape band. ---
+const HORIZON_Y = 0.2;
+const NEAR_Y = 0.94;
+const HORIZON_HALF_ROAD = 0.04;
+const NEAR_HALF_ROAD = 0.48;
 const DEPTH_POW = 1.7;
-const VIEW_DISTANCE = 3.0; // track units ahead that are visible at all
+const VIEW_DISTANCE = 3.6; // track units ahead visible at once — several walls receding into the distance
 const FADE_TAIL = 0.25; // track units of fade-out after passing the player
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
+}
+
+/** Darkens (amt<0) or lightens (amt>0) a "#rrggbb" color, for extrusion faces. */
+function shade(hex: string, amt: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = clamp(((n >> 16) & 0xff) + Math.round(255 * amt), 0, 255);
+  const g = clamp(((n >> 8) & 0xff) + Math.round(255 * amt), 0, 255);
+  const b = clamp((n & 0xff) + Math.round(255 * amt), 0, 255);
+  return `rgb(${r},${g},${b})`;
 }
 
 const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -153,6 +170,65 @@ function spawnBurst(x: number, y: number, color: string, count: number): void {
   }
 }
 
+/** Scatters fragments of the wall's own printed digits — the "digit
+ *  fragments" hit-feedback the reference games use instead of plain sparks. */
+function spawnDigitFragments(x: number, y: number, value: number, color: string): void {
+  const chars = String(value).split("");
+  for (const ch of chars) {
+    for (let i = 0; i < 3; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 90 + Math.random() * 180;
+      const life = 0.45 + Math.random() * 0.4;
+      particles.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 60,
+        life,
+        maxLife: life,
+        color,
+        r: 11 + Math.random() * 6,
+        shape: "glyph",
+        glyph: ch,
+        rot: Math.random() * Math.PI * 2,
+        vrot: (Math.random() - 0.5) * 10,
+      });
+    }
+  }
+}
+
+/** Colorful confetti chips for the win burst — distinct from the plain
+ *  circular sparks used for smaller in-run feedback. */
+function spawnConfetti(x: number, y: number, count: number): void {
+  const palette = ["#ffb648", "#57e0a0", "#7fd7ff", "#ff8fd6", "#ffe27a"];
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 120 + Math.random() * 260;
+    const life = 0.7 + Math.random() * 0.6;
+    particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 160,
+      life,
+      maxLife: life,
+      color: palette[i % palette.length],
+      r: 4 + Math.random() * 4,
+      shape: "rect",
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 12,
+    });
+  }
+}
+
+// --- Screen shake: a small transient offset applied to the whole draw pass,
+// triggered by a bullet chipping a wall or the player hitting one. Decays
+// automatically in frame(). ---
+let shake = 0;
+function triggerShake(amount: number): void {
+  shake = Math.min(1, shake + amount);
+}
+
 // --- Perspective projection: depth 0 = at the horizon (just appeared), 1 =
 // at the player's fixed collision plane. ---
 function depthOf(distanceAhead: number): number {
@@ -179,9 +255,9 @@ function laneCenterX(laneX: number, d: number, W: number): number {
 
 function drawSky(W: number, H: number): void {
   const bg = ctx!.createLinearGradient(0, 0, 0, H);
-  bg.addColorStop(0, "#bfe3ff");
-  bg.addColorStop(0.55, "#eaf6ff");
-  bg.addColorStop(1, "#f7fbff");
+  bg.addColorStop(0, "#7fe6df");
+  bg.addColorStop(0.55, "#c3f4ee");
+  bg.addColorStop(1, "#eefdf9");
   ctx!.fillStyle = bg;
   ctx!.fillRect(0, 0, W, H * (HORIZON_Y + 0.02));
 
@@ -197,6 +273,13 @@ function drawSky(W: number, H: number): void {
   }
 }
 
+// Segmented gray/light-purple-gray "platform" bands, scrolling toward the
+// viewer, instead of one flat fill — the segment lines are what sell "this
+// is a track made of plates rushing past" rather than a static road.
+const ROAD_TONE_A = "#c7c6d8";
+const ROAD_TONE_B = "#dcdae8";
+const BAND_FREQ = 3.4; // bands per track unit
+
 function drawRoad(W: number, H: number): void {
   const nearHalf = roadHalfWidthAt(1, W);
   const farHalf = roadHalfWidthAt(0, W);
@@ -204,17 +287,28 @@ function drawRoad(W: number, H: number): void {
   const farY = yAt(0, H);
   const cx = W / 2;
 
-  ctx!.fillStyle = "#eef2f8";
-  ctx!.beginPath();
-  ctx!.moveTo(cx - farHalf, farY);
-  ctx!.lineTo(cx + farHalf, farY);
-  ctx!.lineTo(cx + nearHalf, nearY);
-  ctx!.lineTo(cx - nearHalf, nearY);
-  ctx!.closePath();
-  ctx!.fill();
+  const STEPS = 44;
+  for (let i = 0; i < STEPS; i++) {
+    const d0 = 1 - i / STEPS;
+    const d1 = 1 - (i + 1) / STEPS;
+    const y0 = yAt(d0, H);
+    const y1 = yAt(d1, H);
+    const h0 = roadHalfWidthAt(d0, W);
+    const h1 = roadHalfWidthAt(d1, W);
+    const bandDistance = state.worldX + (1 - d0) * VIEW_DISTANCE;
+    const bandIndex = Math.floor(bandDistance * BAND_FREQ);
+    ctx!.fillStyle = bandIndex % 2 === 0 ? ROAD_TONE_A : ROAD_TONE_B;
+    ctx!.beginPath();
+    ctx!.moveTo(cx - h0, y0);
+    ctx!.lineTo(cx + h0, y0);
+    ctx!.lineTo(cx + h1, y1);
+    ctx!.lineTo(cx - h1, y1);
+    ctx!.closePath();
+    ctx!.fill();
+  }
 
   // lane dividers (2 interior lines for 3 lanes), scrolling for a sense of speed
-  ctx!.strokeStyle = "rgba(120, 150, 200, 0.55)";
+  ctx!.strokeStyle = "rgba(255, 255, 255, 0.55)";
   const dashOffset = ((idleT * 40 + state.worldX * 260) % 40) - 40;
   for (const boundary of [-1 / 3, 1 / 3]) {
     ctx!.setLineDash([14, 14]);
@@ -227,10 +321,10 @@ function drawRoad(W: number, H: number): void {
   }
   ctx!.setLineDash([]);
 
-  // glowing outer edges
-  ctx!.strokeStyle = "rgba(90, 170, 255, 0.65)";
-  ctx!.shadowColor = "rgba(90, 170, 255, 0.7)";
-  ctx!.shadowBlur = 10;
+  // guardrails: a solid pale rail plus evenly spaced posts along both edges
+  ctx!.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  ctx!.shadowColor = "rgba(140, 200, 255, 0.55)";
+  ctx!.shadowBlur = 8;
   ctx!.lineWidth = 3;
   ctx!.beginPath();
   ctx!.moveTo(cx - farHalf, farY);
@@ -239,6 +333,17 @@ function drawRoad(W: number, H: number): void {
   ctx!.lineTo(cx + nearHalf, nearY);
   ctx!.stroke();
   ctx!.shadowBlur = 0;
+
+  ctx!.fillStyle = "rgba(140, 150, 175, 0.8)";
+  for (let i = 0; i < 10; i++) {
+    const d = Math.pow(i / 10, 1.4);
+    const y = yAt(d, H);
+    const half = roadHalfWidthAt(d, W);
+    const postW = Math.max(1.5, 4 * (0.2 + 0.8 * d));
+    const postH = Math.max(4, 14 * (0.2 + 0.8 * d));
+    ctx!.fillRect(cx - half - postW * 0.5, y - postH, postW, postH);
+    ctx!.fillRect(cx + half - postW * 0.5, y - postH, postW, postH);
+  }
 }
 
 // Faint streak lines scrolling from the horizon toward the viewer, to sell
@@ -298,26 +403,51 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
   if (ob.type === "wall") {
     // Walls render their *live* hp (state.wallHp), not the authored value —
     // digit bullets may have already chipped it down before the player gets
-    // here, and that has to be visible on the wall itself.
+    // here, and that has to be visible on the wall itself. Rendered as a
+    // cyan glass / white-edged block rather than a solid slab, so several
+    // stacked ahead read as "gates in a tunnel," not opaque obstacles.
     const hp = state.wallHp[index] ?? ob.value;
     const isFinish = ob.isFinish === true;
     const cracked = hp < ob.value && hp > 0;
     const shattered = hp <= 0;
-    const w = laneWidth * 0.8;
-    const h = Math.max(10, 46 * scale);
+    const w = laneWidth * 0.82;
+    const h = Math.max(12, 52 * scale);
     const pulse = isFinish ? 0.6 + 0.4 * Math.sin(idleT * 4) : 1;
-    ctx!.fillStyle = isFinish ? "#ffb648" : shattered ? "rgba(95,126,168,0.28)" : "#5f7ea8";
-    ctx!.shadowColor = isFinish ? "rgba(255,182,72,0.9)" : "rgba(95,126,168,0.7)";
-    ctx!.shadowBlur = 14 * pulse;
+    const glassFill = isFinish ? "rgba(255,196,90,0.35)" : "rgba(80,225,220,0.3)";
+    const glassEdge = isFinish ? "rgba(255,196,90,0.95)" : "rgba(255,255,255,0.9)";
     const rx = x - w / 2;
     const ry = y - h;
-    const r = Math.min(10, w * 0.12);
+    const r = Math.min(12, w * 0.14);
+
+    ctx!.fillStyle = shattered ? "rgba(160,190,210,0.14)" : glassFill;
+    ctx!.shadowColor = isFinish ? "rgba(255,196,90,0.85)" : "rgba(90,220,210,0.6)";
+    ctx!.shadowBlur = 16 * pulse;
     roundRect(rx, ry, w, h, r);
     ctx!.fill();
 
+    ctx!.shadowBlur = 0;
+    ctx!.strokeStyle = shattered ? "rgba(255,255,255,0.35)" : glassEdge;
+    ctx!.lineWidth = Math.max(1.5, 2.4 * scale);
+    roundRect(rx, ry, w, h, r);
+    ctx!.stroke();
+
+    // a soft diagonal highlight, so the block reads as glass, not paint
+    ctx!.save();
+    ctx!.beginPath();
+    roundRect(rx, ry, w, h, r);
+    ctx!.clip();
+    ctx!.fillStyle = "rgba(255,255,255,0.22)";
+    ctx!.beginPath();
+    ctx!.moveTo(rx, ry);
+    ctx!.lineTo(rx + w * 0.4, ry);
+    ctx!.lineTo(rx + w * 0.15, ry + h);
+    ctx!.lineTo(rx, ry + h);
+    ctx!.closePath();
+    ctx!.fill();
+    ctx!.restore();
+
     if (cracked) {
-      ctx!.shadowBlur = 0;
-      ctx!.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx!.strokeStyle = "rgba(255,255,255,0.95)";
       ctx!.lineWidth = Math.max(1, 2 * scale);
       ctx!.beginPath();
       ctx!.moveTo(x - w * 0.16, ry + h * 0.12);
@@ -326,39 +456,49 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
       ctx!.stroke();
     }
 
-    ctx!.shadowBlur = 0;
-    ctx!.fillStyle = shattered ? "rgba(255,255,255,0.6)" : "#fff";
-    ctx!.font = `700 ${Math.max(11, 22 * scale)}px system-ui, sans-serif`;
+    ctx!.fillStyle = shattered ? "rgba(255,255,255,0.5)" : "#0e2a3a";
+    ctx!.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx!.lineWidth = Math.max(1, 3 * scale);
+    ctx!.font = `800 ${Math.max(11, 23 * scale)}px system-ui, sans-serif`;
     ctx!.textAlign = "center";
     ctx!.textBaseline = "middle";
+    ctx!.strokeText(String(hp), x, y - h / 2);
     ctx!.fillText(String(hp), x, y - h / 2);
   } else if (ob.type === "zone") {
-    // A floating operator gate: a glowing ring, not a rounded rect — reads
-    // distinctly from both walls and (legacy) item pickups.
-    const colors = modifierColor(ob.kind, ob.value);
-    const gateW = laneWidth * 0.6;
-    const gateH = Math.max(20, 78 * scale);
-    const cy = y - gateH * 0.5;
+    // A translucent cyan "glass" gate panel spanning most of the lane —
+    // reads as a distinct operator gate, not a pickup or a wall.
+    const tint = modifierColor(ob.kind, ob.value);
+    const gateW = laneWidth * 0.74;
+    const gateH = Math.max(24, 82 * scale);
+    const cy = y - gateH * 0.52;
     const pulse = 0.7 + 0.3 * Math.sin(idleT * 3 + ob.atUnits * 5);
-    ctx!.strokeStyle = colors.fill;
-    ctx!.shadowColor = colors.glow;
-    ctx!.shadowBlur = 18 * scale * pulse;
-    ctx!.lineWidth = Math.max(2, 4 * scale);
-    ctx!.beginPath();
-    ctx!.ellipse(x, cy, gateW * 0.5, gateH * 0.5, 0, 0, Math.PI * 2);
-    ctx!.stroke();
+    const rx = x - gateW / 2;
+    const ry = cy - gateH / 2;
+    const r = Math.min(14, gateW * 0.18);
 
-    ctx!.save();
-    ctx!.globalAlpha *= 0.16;
-    ctx!.fillStyle = colors.fill;
+    ctx!.fillStyle = "rgba(110,230,225,0.28)";
+    ctx!.shadowColor = "rgba(110,230,225,0.7)";
+    ctx!.shadowBlur = 18 * scale * pulse;
+    roundRect(rx, ry, gateW, gateH, r);
     ctx!.fill();
-    ctx!.restore();
 
     ctx!.shadowBlur = 0;
-    ctx!.fillStyle = colors.fill;
-    ctx!.font = `800 ${Math.max(12, 21 * scale)}px system-ui, sans-serif`;
+    ctx!.strokeStyle = tint.fill;
+    ctx!.lineWidth = Math.max(2, 3 * scale);
+    roundRect(rx, ry, gateW, gateH, r);
+    ctx!.stroke();
+    ctx!.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx!.lineWidth = Math.max(1, 1.5 * scale);
+    roundRect(rx + 2, ry + 2, gateW - 4, gateH - 4, Math.max(1, r - 2));
+    ctx!.stroke();
+
+    ctx!.fillStyle = "#0e2a3a";
+    ctx!.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx!.lineWidth = Math.max(1.5, 3.4 * scale);
+    ctx!.font = `800 ${Math.max(13, 24 * scale)}px system-ui, sans-serif`;
     ctx!.textAlign = "center";
     ctx!.textBaseline = "middle";
+    ctx!.strokeText(labelFor(ob), x, cy);
     ctx!.fillText(labelFor(ob), x, cy);
   } else {
     const colors = modifierColor(ob.kind, ob.value);
@@ -395,10 +535,13 @@ function cannonPos(W: number, H: number): { x: number; y: number } {
   return { x: laneCenterX(state.laneX, 1, W), y: yAt(1, H) };
 }
 
-// The player's body IS their number: a large, glowing, slightly 3D digit —
-// no separate cannon shape. It reacts to what just happened to playerValue
-// (green pulse on a gain, purple flash + afterimage on a multiply, red
-// shake on a loss) via the decaying `playerFx` set in frame().
+const PLAYER_BLUE = "#3b82f6";
+
+// The player's body IS their number: a large extruded-3D blue digit — no
+// separate block/turret shape. It reacts to what just happened to
+// playerValue (scale-up + blue/green flash on a gain, rapid expansion +
+// afterimage on a multiply, red shake on a loss) via the decaying
+// `playerFx` set in frame().
 function drawPlayerDigit(W: number, H: number): void {
   const inResult = state.status === "won" || state.status === "lost";
   // On win/lost the digit doesn't just vanish: it holds the moment of impact
@@ -414,8 +557,9 @@ function drawPlayerDigit(W: number, H: number): void {
   const { x, y } = cannonPos(W, H);
   const bob = inResult ? 0 : Math.sin(idleT * 2.6) * 3;
   const laneWidth = (roadHalfWidthAt(1, W) * 2) / LANES;
-  const fontSize = laneWidth * 0.6;
+  const fontSize = laneWidth * 0.66;
 
+  let face = PLAYER_BLUE;
   let glow = "rgba(120,190,255,0.85)";
   let scale = 1;
   let tilt = inResult ? 0 : Math.sin(idleT * 1.7) * 0.05;
@@ -424,9 +568,11 @@ function drawPlayerDigit(W: number, H: number): void {
   if (inResult) {
     const punch = 1 - resultFade;
     if (state.status === "won") {
+      face = "#ffd76a";
       glow = `rgba(255,182,72,${0.5 + 0.5 * resultFade})`;
       scale = 1 + 0.4 * punch;
     } else {
+      face = "#ff5064";
       glow = `rgba(255,80,100,${0.5 + 0.5 * resultFade})`;
       scale = 1 - 0.35 * punch;
       tilt = Math.sin(idleT * 50) * 0.09 * punch;
@@ -434,13 +580,16 @@ function drawPlayerDigit(W: number, H: number): void {
   } else if (playerFx) {
     const decay = clamp(1 - playerFx.t / 0.5, 0, 1);
     if (playerFx.kind === "gain") {
+      face = "#57e0a0";
       glow = `rgba(87,224,160,${0.55 + 0.45 * decay})`;
       scale = 1 + 0.16 * decay;
     } else if (playerFx.kind === "mult") {
+      face = "#b98bff";
       glow = `rgba(185,139,255,${0.55 + 0.45 * decay})`;
-      scale = 1 + 0.3 * decay;
-      afterimage = decay > 0.15;
+      scale = 1 + 0.5 * decay; // rapid expansion, per the x2-boost spec
+      afterimage = decay > 0.1;
     } else if (playerFx.kind === "loss") {
+      face = "#ff5064";
       glow = `rgba(255,107,122,${0.55 + 0.45 * decay})`;
       scale = 1 - 0.1 * decay;
       tilt += Math.sin(idleT * 40) * 0.05 * decay;
@@ -448,6 +597,7 @@ function drawPlayerDigit(W: number, H: number): void {
   }
 
   const label = String(state.playerValue);
+  const dark = shade(face, -0.55);
 
   ctx!.save();
   ctx!.globalAlpha = resultFade;
@@ -455,12 +605,12 @@ function drawPlayerDigit(W: number, H: number): void {
   ctx!.rotate(tilt);
   ctx!.scale(scale, scale);
 
-  // ground shadow: anchors the digit to the road without becoming the focus
+  // ground shadow: small and non-dominant, just anchors the digit to the road
   ctx!.save();
   ctx!.globalAlpha = 0.22;
   ctx!.fillStyle = "#123";
   ctx!.beginPath();
-  ctx!.ellipse(0, fontSize * 0.56, fontSize * 0.34, fontSize * 0.1, 0, 0, Math.PI * 2);
+  ctx!.ellipse(0, fontSize * 0.56, fontSize * 0.3, fontSize * 0.09, 0, 0, Math.PI * 2);
   ctx!.fill();
   ctx!.restore();
 
@@ -470,19 +620,27 @@ function drawPlayerDigit(W: number, H: number): void {
 
   if (afterimage) {
     ctx!.save();
-    ctx!.globalAlpha = 0.32;
+    ctx!.globalAlpha = 0.3;
     ctx!.fillStyle = "#b98bff";
-    ctx!.fillText(label, -7, -7);
+    ctx!.fillText(label, -9, -9);
     ctx!.restore();
   }
 
-  // darker duplicate, offset for a pseudo-3D depth read
-  ctx!.fillStyle = "rgba(15,30,55,0.4)";
-  ctx!.fillText(label, 3, 4);
+  // extruded thickness: several stacked, progressively darker copies offset
+  // down-right, so the digit reads as a thick 3D block instead of flat text.
+  const EXTRUDE_STEPS = 7;
+  for (let i = EXTRUDE_STEPS; i >= 1; i--) {
+    ctx!.fillStyle = dark;
+    ctx!.fillText(label, i * 0.85, i * 0.85);
+  }
 
+  // top face: bright color, white outline, soft glow
   ctx!.shadowColor = glow;
-  ctx!.shadowBlur = 22;
-  ctx!.fillStyle = "#0e1b30";
+  ctx!.shadowBlur = 26;
+  ctx!.lineWidth = Math.max(2, fontSize * 0.045);
+  ctx!.strokeStyle = "rgba(255,255,255,0.95)";
+  ctx!.strokeText(label, 0, 0);
+  ctx!.fillStyle = face;
   ctx!.fillText(label, 0, 0);
   ctx!.shadowBlur = 0;
 
@@ -517,50 +675,124 @@ function drawPlayerHud(W: number): void {
 }
 
 // Digit bullets are real state (state.bullets, owned by game.ts's step()) —
-// this just projects them. Colored by whether they're currently boosted,
-// multiplied, or reduced relative to their starting value, with a short
-// fading trail (a couple of stamps behind the current position, no extra
-// state needed) so they read as moving fast rather than teleporting.
-function bulletColor(value: number): { fill: string; glow: string } {
-  if (value > BULLET_BASE_VALUE) return { fill: "#57e0a0", glow: "rgba(87,224,160,0.9)" };
-  if (value < BULLET_BASE_VALUE) return { fill: "#ff6b7a", glow: "rgba(255,107,122,0.9)" };
-  return { fill: "#eaffff", glow: "rgba(180,240,255,0.9)" };
+// this just projects them, as a white paper-plane/arrow with a trail plus a
+// blue digit badge riding just behind it. Boosted bullets (grown through a
+// +N/x2 gate) grow and brighten; reduced ones shrink and dim.
+function bulletBadgeStyle(value: number): { badge: string; glow: string; scale: number } {
+  if (value > BULLET_BASE_VALUE) return { badge: "#3b82f6", glow: "rgba(255,214,106,0.95)", scale: 1.3 };
+  if (value < BULLET_BASE_VALUE) return { badge: "#5f7a99", glow: "rgba(120,140,170,0.6)", scale: 0.82 };
+  return { badge: "#3b82f6", glow: "rgba(120,190,255,0.85)", scale: 1 };
+}
+
+function drawArrow(x: number, y: number, r: number, alpha: number): void {
+  ctx!.save();
+  ctx!.globalAlpha = alpha;
+  ctx!.fillStyle = "#ffffff";
+  ctx!.strokeStyle = "rgba(90,140,200,0.9)";
+  ctx!.lineWidth = Math.max(0.75, r * 0.08);
+  ctx!.beginPath();
+  ctx!.moveTo(x, y - r * 1.35);
+  ctx!.lineTo(x - r * 0.62, y + r * 0.5);
+  ctx!.lineTo(x, y + r * 0.12);
+  ctx!.lineTo(x + r * 0.62, y + r * 0.5);
+  ctx!.closePath();
+  ctx!.fill();
+  ctx!.stroke();
+  ctx!.restore();
 }
 
 function drawBullets(W: number, H: number): void {
   for (const b of state.bullets) {
-    const colors = bulletColor(b.value);
-    for (const trailBack of [0.12, 0.06, 0]) {
+    const style = bulletBadgeStyle(b.value);
+
+    // fading trail stamps (the plane's own past positions)
+    for (const trailBack of [0.16, 0.09]) {
       const distanceAhead = b.atUnits - trailBack - state.worldX;
       if (!visibleAt(distanceAhead)) continue;
       const d = depthOf(distanceAhead);
-      const isHead = trailBack === 0;
-      const alpha = fadeAlpha(distanceAhead) * (isHead ? 1 : 0.3);
+      const alpha = fadeAlpha(distanceAhead) * 0.28;
       const x = laneCenterX(b.lane, d, W);
       const y = yAt(d, H);
       const scale = 0.16 + 0.84 * d;
-      const r = Math.max(8, 15 * scale);
-
-      ctx!.save();
-      ctx!.globalAlpha = alpha;
-      ctx!.fillStyle = colors.fill;
-      ctx!.shadowColor = colors.glow;
-      ctx!.shadowBlur = (isHead ? 10 : 4) * scale;
-      ctx!.beginPath();
-      ctx!.ellipse(x, y, r * 0.72, r * 0.5, 0, 0, Math.PI * 2);
-      ctx!.fill();
-
-      if (isHead) {
-        ctx!.shadowBlur = 0;
-        ctx!.fillStyle = "#0c1420";
-        ctx!.font = `800 ${Math.max(9, 13 * scale)}px system-ui, sans-serif`;
-        ctx!.textAlign = "center";
-        ctx!.textBaseline = "middle";
-        ctx!.fillText(String(b.value), x, y);
-      }
-      ctx!.restore();
+      drawArrow(x, y, Math.max(6, 12 * scale), alpha);
     }
+
+    const distanceAhead = b.atUnits - state.worldX;
+    if (!visibleAt(distanceAhead)) continue;
+    const d = depthOf(distanceAhead);
+    const alpha = fadeAlpha(distanceAhead);
+    const x = laneCenterX(b.lane, d, W);
+    const y = yAt(d, H);
+    const scale = 0.16 + 0.84 * d;
+    const r = Math.max(9, 16 * scale);
+
+    ctx!.save();
+    ctx!.globalAlpha = alpha;
+    ctx!.shadowColor = "rgba(255,255,255,0.6)";
+    ctx!.shadowBlur = 6 * scale;
+    drawArrow(x, y, r, 1);
+    ctx!.restore();
+
+    // the carried digit: a small blue badge beside/behind the arrowhead
+    const badgeR = Math.max(7, 11 * scale) * style.scale;
+    const bx = x;
+    const by = y + r * 0.95;
+    ctx!.save();
+    ctx!.globalAlpha = alpha;
+    ctx!.fillStyle = style.badge;
+    ctx!.shadowColor = style.glow;
+    ctx!.shadowBlur = 12 * scale * style.scale;
+    ctx!.beginPath();
+    ctx!.ellipse(bx, by, badgeR, badgeR * 0.86, 0, 0, Math.PI * 2);
+    ctx!.fill();
+    ctx!.shadowBlur = 0;
+    ctx!.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx!.lineWidth = Math.max(1, scale);
+    ctx!.stroke();
+    ctx!.fillStyle = "#fff";
+    ctx!.font = `800 ${Math.max(9, 13 * scale * style.scale)}px system-ui, sans-serif`;
+    ctx!.textAlign = "center";
+    ctx!.textBaseline = "middle";
+    ctx!.fillText(String(b.value), bx, by);
+    ctx!.restore();
   }
+}
+
+// A backdrop cluster of large pale 3D digits near the horizon, behind the
+// finish gauntlet — echoes the stacked digit crowd at the end of the
+// reference games instead of the gauntlet arriving as three bare walls.
+const FINISH_UNITS = Math.max(...OBSTACLES.filter((o) => o.type === "wall" && o.isFinish === true).map((o) => o.atUnits));
+const FINISH_CLUSTER = [
+  { dx: -0.24, dy: 0.0, digit: "1", size: 1.0 },
+  { dx: 0.04, dy: -0.04, digit: "6", size: 1.25 },
+  { dx: 0.3, dy: 0.01, digit: "3", size: 0.9 },
+  { dx: -0.44, dy: -0.05, digit: "2", size: 0.75 },
+  { dx: 0.46, dy: -0.03, digit: "4", size: 0.8 },
+  { dx: -0.06, dy: 0.06, digit: "6", size: 1.05 },
+];
+
+function drawFinishCluster(W: number, H: number): void {
+  const distanceAhead = FINISH_UNITS - state.worldX;
+  if (distanceAhead > VIEW_DISTANCE || distanceAhead < -0.4) return;
+  const alpha = clamp(1 - Math.max(distanceAhead, 0) / VIEW_DISTANCE, 0, 1) * 0.85;
+  if (alpha <= 0.01) return;
+  const y = yAt(0, H) - H * 0.015;
+  const cx = W / 2;
+  ctx!.save();
+  ctx!.globalAlpha = alpha;
+  ctx!.fillStyle = "rgba(255,255,255,0.9)";
+  ctx!.strokeStyle = "rgba(120,190,255,0.5)";
+  ctx!.textAlign = "center";
+  ctx!.textBaseline = "middle";
+  for (const f of FINISH_CLUSTER) {
+    const fontSize = H * 0.05 * f.size;
+    ctx!.font = `800 ${fontSize}px system-ui, sans-serif`;
+    const bob = Math.sin(idleT * 2 + f.dx * 10) * 3;
+    ctx!.lineWidth = Math.max(1, fontSize * 0.05);
+    ctx!.strokeText(f.digit, cx + f.dx * W * 0.55, y + f.dy * H * 0.5 + bob);
+    ctx!.fillText(f.digit, cx + f.dx * W * 0.55, y + f.dy * H * 0.5 + bob);
+  }
+  ctx!.restore();
 }
 
 function drawProgress(W: number): void {
@@ -592,9 +824,16 @@ function draw(): void {
   if (W === 0 || H === 0) return;
   ctx!.clearRect(0, 0, W, H);
 
+  ctx!.save();
+  if (shake > 0.001) {
+    const mag = 9 * shake;
+    ctx!.translate((Math.random() - 0.5) * mag, (Math.random() - 0.5) * mag);
+  }
+
   drawSky(W, H);
   drawRoad(W, H);
   drawSpeedLines(W, H);
+  drawFinishCluster(W, H);
   for (let i = 0; i < OBSTACLES.length; i++) drawObstacle(OBSTACLES[i], i, W, H);
   drawBullets(W, H);
   drawPlayerDigit(W, H);
@@ -602,15 +841,33 @@ function draw(): void {
   drawPlayerHud(W);
 
   for (const p of particles) {
+    ctx!.save();
     ctx!.globalAlpha = Math.max(0, p.life / p.maxLife);
-    ctx!.fillStyle = p.color;
-    ctx!.beginPath();
-    ctx!.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-    ctx!.fill();
+    if (p.shape === "glyph") {
+      ctx!.translate(p.x, p.y);
+      ctx!.rotate(p.rot ?? 0);
+      ctx!.fillStyle = p.color;
+      ctx!.font = `800 ${p.r * 1.8}px system-ui, sans-serif`;
+      ctx!.textAlign = "center";
+      ctx!.textBaseline = "middle";
+      ctx!.fillText(p.glyph ?? "", 0, 0);
+    } else if (p.shape === "rect") {
+      ctx!.translate(p.x, p.y);
+      ctx!.rotate(p.rot ?? 0);
+      ctx!.fillStyle = p.color;
+      ctx!.fillRect(-p.r, -p.r * 0.5, p.r * 2, p.r);
+    } else {
+      ctx!.fillStyle = p.color;
+      ctx!.beginPath();
+      ctx!.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx!.fill();
+    }
+    ctx!.restore();
   }
   ctx!.globalAlpha = 1;
 
   drawResultFlash(W, H);
+  ctx!.restore();
 }
 
 let last = performance.now();
@@ -646,31 +903,43 @@ function frame(t: number): void {
         spawnBurst(fx, fy, colors.fill, 14);
         playerFx = { kind: ob.kind === "mul" ? "mult" : ob.value >= 0 ? "gain" : "loss", t: 0 };
       } else if (isLastResolved && state.status === "lost") {
-        spawnBurst(fx, fy, "#ff5064", 36);
+        spawnBurst(fx, fy, "#ff5064", 24);
+        spawnDigitFragments(fx, fy, state.playerValue, "#ff5064");
         playerFx = { kind: "loss", t: 0 };
+        triggerShake(0.5);
       } else if (isLastResolved && state.status === "won") {
-        spawnBurst(fx, fy, "#ffb648", 44);
+        spawnConfetti(fx, fy, 50);
+        if (ob.type === "wall") spawnDigitFragments(fx, fy, ob.value, "#ffd76a");
+        triggerShake(0.35);
       } else if (ob.type === "wall" && touchedPlayer) {
-        spawnBurst(fx, fy, "#ffd76a", 18);
+        spawnBurst(fx, fy, "#ffffff", 10);
+        spawnDigitFragments(fx, fy, ob.value, "#8fd0ff");
+        triggerShake(0.3);
       }
     }
     if (state.status === "lost" && prevStatus === "playing" && state.resolvedUpTo === prevResolvedUpTo) {
-      spawnBurst(fx, fy, "#ff5064", 36);
+      spawnBurst(fx, fy, "#ff5064", 24);
+      spawnDigitFragments(fx, fy, state.playerValue, "#ff5064");
       playerFx = { kind: "loss", t: 0 };
+      triggerShake(0.5);
     }
 
-    // Bullet-vs-wall feedback: a small debris puff the instant a wall's live
-    // hp drops, even while the player themselves is still well short of it.
+    // Bullet-vs-wall feedback: a white flash burst + scattering digit
+    // fragments the instant a wall's live hp drops, plus a slight screen
+    // shake — even while the player themselves is still well short of it.
     for (let i = 0; i < OBSTACLES.length; i++) {
       const ob = OBSTACLES[i];
       if (ob.type !== "wall") continue;
-      if (state.wallHp[i] < (prevWallHp[i] ?? ob.value)) {
+      const prevHp = prevWallHp[i] ?? ob.value;
+      if (state.wallHp[i] < prevHp) {
         const distanceAhead = ob.atUnits - state.worldX;
         if (visibleAt(distanceAhead)) {
           const d = depthOf(distanceAhead);
           const wx = laneCenterX(ob.lane, d, size.width);
           const wy = yAt(d, size.height);
-          spawnBurst(wx, wy, "#8fd0ff", 6);
+          spawnBurst(wx, wy, "#ffffff", 8);
+          spawnDigitFragments(wx, wy, prevHp - state.wallHp[i], "#8fd0ff");
+          triggerShake(0.12);
         }
       }
     }
@@ -681,6 +950,8 @@ function frame(t: number): void {
     if (playerFx.t > 0.6) playerFx = null;
   }
 
+  shake = Math.max(0, shake - dt * 3.2);
+
   particles = particles
     .map((p) => ({
       ...p,
@@ -688,6 +959,7 @@ function frame(t: number): void {
       y: p.y + p.vy * dt,
       vy: p.vy + 260 * dt,
       life: p.life - dt,
+      rot: p.rot !== undefined ? p.rot + (p.vrot ?? 0) * dt : p.rot,
     }))
     .filter((p) => p.life > 0);
 
