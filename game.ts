@@ -42,7 +42,7 @@ export interface CanvasSize {
 // --- Tunables, all resolution-independent (fractions of canvas W/H, or of
 // screen-widths for horizontal distance) so the track plays the same at a
 // phone portrait viewport and a desktop one. ---
-export const TRACK_LENGTH = 16.6; // screens to the finish gate
+export const TRACK_LENGTH = 15.8; // screens to the finish gate
 export const BASE_SPEED = 0.5; // screens/sec at the start
 export const MAX_SPEED = 0.92; // screens/sec at the finish
 export const FLIP_DURATION = 0.16; // seconds for the flip animation
@@ -55,22 +55,29 @@ export const SPIKE_WIDTH = 0.05; // fraction of canvas width
 
 // Hand-authored track: a short teaching pair, then patterns that get denser
 // and faster, one rapid double, a breather, and a tight run to the gate.
+//
+// The first spike sits at 0.55 screens — close enough that it's inside the
+// canvas (BALL_X + atScreens < 1) while the ball is still frozen at worldX 0,
+// so it's visible at rest, not just once the world starts scrolling. Playtesting
+// caught this: the original first spike (1.35 screens out) rendered entirely
+// off-canvas until the world had already started moving, so the opening frame
+// showed a lone ball with nothing to react to.
 export const OBSTACLES: readonly Obstacle[] = [
-  { atScreens: 1.35, side: "bottom" },
-  { atScreens: 2.55, side: "top" },
-  { atScreens: 3.85, side: "bottom" },
-  { atScreens: 4.85, side: "top" },
-  { atScreens: 6.0, side: "bottom" },
-  { atScreens: 6.35, side: "top" }, // quick double
-  { atScreens: 7.6, side: "bottom" },
-  { atScreens: 8.9, side: "top" },
-  { atScreens: 10.6, side: "bottom" }, // breather before this
-  { atScreens: 11.9, side: "top" },
-  { atScreens: 12.2, side: "bottom" }, // quick double
-  { atScreens: 13.3, side: "top" },
-  { atScreens: 13.95, side: "bottom" },
-  { atScreens: 14.6, side: "top" },
-  { atScreens: 15.25, side: "bottom" },
+  { atScreens: 0.55, side: "bottom" },
+  { atScreens: 1.75, side: "top" },
+  { atScreens: 3.05, side: "bottom" },
+  { atScreens: 4.05, side: "top" },
+  { atScreens: 5.2, side: "bottom" },
+  { atScreens: 5.55, side: "top" }, // quick double
+  { atScreens: 6.8, side: "bottom" },
+  { atScreens: 8.1, side: "top" },
+  { atScreens: 9.8, side: "bottom" }, // breather before this
+  { atScreens: 11.1, side: "top" },
+  { atScreens: 11.4, side: "bottom" }, // quick double
+  { atScreens: 12.5, side: "top" },
+  { atScreens: 13.15, side: "bottom" },
+  { atScreens: 13.8, side: "top" },
+  { atScreens: 14.45, side: "bottom" },
 ];
 
 function railY(side: Side): number {
