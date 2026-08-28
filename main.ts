@@ -762,13 +762,16 @@ function drawBullets(W: number, H: number): void {
 // finish gauntlet — echoes the stacked digit crowd at the end of the
 // reference games instead of the gauntlet arriving as three bare walls.
 const FINISH_UNITS = Math.max(...OBSTACLES.filter((o) => o.type === "wall" && o.isFinish === true).map((o) => o.atUnits));
+// A back row of smaller/higher digits and a front row of larger/lower ones —
+// a deliberate stacked-pyramid layout (not scattered) so none of the six
+// glyphs overlap another at any canvas width.
 const FINISH_CLUSTER = [
-  { dx: -0.24, dy: 0.0, digit: "1", size: 1.0 },
-  { dx: 0.04, dy: -0.04, digit: "6", size: 1.25 },
-  { dx: 0.3, dy: 0.01, digit: "3", size: 0.9 },
-  { dx: -0.44, dy: -0.05, digit: "2", size: 0.75 },
-  { dx: 0.46, dy: -0.03, digit: "4", size: 0.8 },
-  { dx: -0.06, dy: 0.06, digit: "6", size: 1.05 },
+  { dx: -0.42, dy: -0.06, digit: "3", size: 0.75 },
+  { dx: 0.0, dy: -0.09, digit: "6", size: 0.9 },
+  { dx: 0.42, dy: -0.06, digit: "4", size: 0.75 },
+  { dx: -0.26, dy: 0.05, digit: "1", size: 1.1 },
+  { dx: 0.26, dy: 0.05, digit: "2", size: 1.1 },
+  { dx: 0.0, dy: 0.12, digit: "6", size: 1.35 },
 ];
 
 function drawFinishCluster(W: number, H: number): void {
@@ -814,7 +817,11 @@ function drawResultFlash(W: number, H: number): void {
   if (state.status !== "won" && state.status !== "lost") return;
   if (resultAt === null) return;
   const t = Math.min(1, (now - resultAt) / RESULT_HOLD_MS);
-  const alpha = (1 - t) * 0.32;
+  // Kept light (peak 0.16, was 0.32): a full-canvas tint strong enough to
+  // read as "win/loss mood" but not so strong it drowns the road, walls, and
+  // finish cluster in sepia/mauve — the payoff moment is exactly when the
+  // scene most needs to stay legible.
+  const alpha = (1 - t) * 0.16;
   ctx!.fillStyle = state.status === "won" ? `rgba(255,182,72,${alpha})` : `rgba(255,80,100,${alpha})`;
   ctx!.fillRect(0, 0, W, H);
 }
