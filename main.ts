@@ -400,18 +400,38 @@ function cannonPos(W: number, H: number): { x: number; y: number } {
 // (green pulse on a gain, purple flash + afterimage on a multiply, red
 // shake on a loss) via the decaying `playerFx` set in frame().
 function drawPlayerDigit(W: number, H: number): void {
-  if (state.status === "won" || state.status === "lost") return;
+  const inResult = state.status === "won" || state.status === "lost";
+  // On win/lost the digit doesn't just vanish: it holds the moment of impact
+  // (smashing bigger through a won finish wall, jolting on a lost one) then
+  // fades over the first ~0.5s of RESULT_HOLD_MS, rather than cutting to the
+  // walls/flash-tint with nothing marking where the player was.
+  let resultFade = 1;
+  if (inResult) {
+    if (resultAt === null) return;
+    resultFade = clamp(1 - (now - resultAt) / 500, 0, 1);
+    if (resultFade <= 0) return;
+  }
   const { x, y } = cannonPos(W, H);
-  const bob = Math.sin(idleT * 2.6) * 3;
+  const bob = inResult ? 0 : Math.sin(idleT * 2.6) * 3;
   const laneWidth = (roadHalfWidthAt(1, W) * 2) / LANES;
   const fontSize = laneWidth * 0.6;
 
   let glow = "rgba(120,190,255,0.85)";
   let scale = 1;
-  let tilt = Math.sin(idleT * 1.7) * 0.05;
+  let tilt = inResult ? 0 : Math.sin(idleT * 1.7) * 0.05;
   let afterimage = false;
 
-  if (playerFx) {
+  if (inResult) {
+    const punch = 1 - resultFade;
+    if (state.status === "won") {
+      glow = `rgba(255,182,72,${0.5 + 0.5 * resultFade})`;
+      scale = 1 + 0.4 * punch;
+    } else {
+      glow = `rgba(255,80,100,${0.5 + 0.5 * resultFade})`;
+      scale = 1 - 0.35 * punch;
+      tilt = Math.sin(idleT * 50) * 0.09 * punch;
+    }
+  } else if (playerFx) {
     const decay = clamp(1 - playerFx.t / 0.5, 0, 1);
     if (playerFx.kind === "gain") {
       glow = `rgba(87,224,160,${0.55 + 0.45 * decay})`;
@@ -430,6 +450,7 @@ function drawPlayerDigit(W: number, H: number): void {
   const label = String(state.playerValue);
 
   ctx!.save();
+  ctx!.globalAlpha = resultFade;
   ctx!.translate(x, y - fontSize * 0.42 + bob);
   ctx!.rotate(tilt);
   ctx!.scale(scale, scale);
