@@ -255,9 +255,9 @@ describe("isWallDestroyed: the single check the renderer and tests both use", ()
 });
 
 describe("step(): bullets chip walls ahead of the player", () => {
-  it("bullets fired while in lane 1, boosted by the free ×2 gate, chip the first wall (24) before the player arrives", () => {
+  it("bullets fired while in lane 1, boosted by the free ×2 gate, chip the first wall (14) before the player arrives", () => {
     // BULLET_SPEED is fast enough that, staying in lane 1 the whole way, the
-    // auto-fired bullets reach the first wall (atUnits 1.7, value 24) well
+    // auto-fired bullets reach the first wall (atUnits 1.7, value 14) well
     // before the (much slower) player's own worldX does.
     let state = createInitialState();
     state = { ...state, status: "playing", lane: 1, laneX: 1, laneFrom: 1 };
@@ -266,7 +266,7 @@ describe("step(): bullets chip walls ahead of the player", () => {
       state = step(state, dt, 1);
     }
     const wallIndex = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.atUnits === 1.7);
-    expect(state.wallHp[wallIndex]).toBeLessThan(24);
+    expect(state.wallHp[wallIndex]).toBeLessThan(14);
   });
 
   it("a wall chipped down to 0 (the effective obstacle step() builds from wallHp) lets even a very weak player through", () => {
@@ -381,7 +381,7 @@ describe("the hand-authored level, driven end to end through the real level data
     };
   }
 
-  it("wins by collecting every visible bonus, dodging every danger zone, and beating the middle finish wall (850)", () => {
+  it("wins by collecting every visible bonus, dodging every danger zone, and beating the middle finish wall (420)", () => {
     const final = drivePath(zigzag(FORK_VISITS, 1));
     expect(final.status).toBe("won");
   });
@@ -389,11 +389,12 @@ describe("the hand-authored level, driven end to end through the real level data
   it("loses (not instantly, and well short of the mid tier) by never leaving the middle lane and skipping every bonus", () => {
     const final = drivePath((state) => 1);
     expect(final.status).toBe("lost");
-    // Clears the very first wall (24 at 1.7) via the free ×2 gate plus
+    // Clears the first three walls (14/18/24) via the free ×2 gate plus
     // bullet chip alone — this isn't a first-wall instant-death build — but
-    // dies in the teaching tier, well before ever reaching a mid-tier wall.
+    // dies in the teaching tier, right at the wall (40 at 4.1) that finally
+    // outpaces what passive chip alone can keep up with.
     expect(final.worldX).toBeGreaterThan(1.7);
-    expect(final.worldX).toBeLessThan(4.1);
+    expect(final.worldX).toBeLessThan(4.2);
   });
 
   it("a run that misses one or two later buffs (a realistic first attempt) still wins", () => {

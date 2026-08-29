@@ -425,6 +425,77 @@ no lingering particles. All six scratch Playwright scripts used to drive
 these playtests are deleted once this section captured their findings, same
 as every prior round.
 
+## Round six: the same two complaints came back, so I stopped trusting my earlier fix and re-derived the actual cause
+
+After round five shipped, the user tested the live deploy themselves and
+reported, almost verbatim, the exact two complaints round five's investigation
+(and round three/four before it) had already been marked resolved: walls feel
+like they're in every lane with no way to dodge, and bullets sometimes still
+seem to not fire. Repeating a complaint after a fix that was supposed to
+address it is a signal to re-derive the cause from scratch, not to re-assert
+the old explanation — so before changing anything I re-read `game.ts` and
+`main.ts` end to end again with the specific goal of finding what a fresh pair
+of eyes would actually experience.
+
+**Ruled out (both cleanly, with evidence, not by assumption):**
+
+- *Rendering confusion between walls and zones.* `drawObstacle` renders walls
+  as a cyan/white glass block (a distinct rounded rectangle) and zones as
+  colored energy-gate ovals (green/purple/orange/red by kind) — genuinely
+  different shapes and palettes, not a shared "red = danger" language I'd
+  worried might be the problem. A screenshot mid-run that at a glance looked
+  like a red circle sitting in the wall lane turned out, on closer inspection
+  of `drawBullets`/`bulletBadgeStyle`, to be a bullet tinted red because it
+  had just flown through a `-N` zone — not a wall at all. So the visual
+  language is fine; this wasn't a legibility bug.
+- *A bullet-firing regression.* Polled `state.nextBulletId` continuously
+  through several live Playwright runs (a monotonic counter that only
+  increments when `step()` actually spawns a bullet — the ground-truth signal,
+  not a rendering side effect) and found no gap exceeding the current fire
+  interval, across both a near-random "casual" input bot and a
+  "75%-correct-fork" semi-attentive bot. No evidence of bullets failing to
+  fire.
+
+**What was actually true:** the *balance*. `FORK_TIERS`' wall values and "bad"
+zone penalties from round four's rebalance escalated fast enough that missing
+even the first three forks — entirely plausible for a player still learning
+the controls in their first ~15 seconds — permanently capped `playerValue` at
+8 (the free starting ×2 gate's result) with no way to ever catch up: the very
+next wall (was 90) was already far out of reach, and every wall after it only
+gets bigger. From the player's seat, that reads exactly as "no matter which
+lane I pick, I lose" — because at that point it's true, just not for a
+dodging reason. A simulation (`spec/_tmp_sim.test.ts`, written to check this
+and deleted once it had) confirmed: with the round-four tuning, missing the
+first 3 forks was already an unrecoverable loss by `worldX` 3.3; missing the
+first *4* still is even after this round's changes, which is the acceptable,
+intended edge (a run that never engages the mechanic at all is still meant to
+lose — that's the point of the forks existing).
+
+**The rebalance** (`game.ts`): eased the early-to-mid wall ladder (24→14,
+36→18, 48→24, 90→40, 130→60, 180→85, 260→120, 360→165, 480→230) and every
+"bad" zone's penalty (roughly halved across the board, e.g. -8→-3, -100→-40),
+sped up the base fire interval (0.75s→0.6s, floor 0.32s→0.28s) so passive
+bullet chip carries a fairer share of the load, and eased the finish gauntlet
+(600/850/1200 → 300/420/620) since the old values only let a frame-perfect run
+clear 2 of 3 lanes.
+
+**Verification, not just arithmetic:** a temporary simulation test drove the
+real `OBSTACLES` data through every "miss the first N forks" / "miss the last
+N forks" combination and printed outcomes — confirming missing the first 1-3
+forks (previously fatal) now still wins, missing the last several (a
+late-run slip) still won both before and after, and a fully passive run still
+correctly loses, just later (worldX 3.3 → 4.1) giving a new player more of the
+track to learn from before the mechanic becomes mandatory. Two live Playwright
+bots then played the actual rebuilt page: a near-random "casual" bot (50%
+chance of no input at all) lost as expected, and a "75%-correct" semi-attentive
+bot — meant to model an engaged-but-imperfect real player — won all 3 of 3
+runs, with zero console errors and a bullet-fire cadence matching the
+expected interval throughout. Two of the level-balance unit tests had
+hardcoded comments/bounds referencing the old wall values (14/18/24 vs the old
+24/36/48, and the passive-loss bound 4.1 vs the old 4.1 coincidentally still
+close but now landing exactly on the wall instead of before it) — updated to
+match, all 63 tests green, `pnpm check` clean.
+
 ## Directing the AI collaboration
 
 I set the constraints this week (the player's identity must be the number
