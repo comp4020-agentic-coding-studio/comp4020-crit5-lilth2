@@ -496,6 +496,110 @@ hardcoded comments/bounds referencing the old wall values (14/18/24 vs the old
 close but now landing exactly on the wall instead of before it) — updated to
 match, all 63 tests green, `pnpm check` clean.
 
+## Round seven: the game never actually ended, a fresh difficulty complaint that pulled against round six, and re-verifying the bullet complaint instead of re-explaining it
+
+The user played the live deploy again and sent a detailed report. Four things
+came out of it.
+
+**The result screen was auto-restarting with no input — the highest-priority
+fix.** `frame()` unconditionally called `restartNow()` once `RESULT_HOLD_MS`
+(1300ms) had elapsed after entering `"won"`/`"lost"`, regardless of any player
+action, and there was no manual-restart path for a win at all (only
+`restartReady()`'s loss branch was wired to the pointerdown handler). Crit 5
+requires the game to visibly, provably end, and a result screen that clears
+itself in just over a second before a player has time to read it does not
+satisfy that. Fixed by deleting the auto-restart call outright, extending
+`restartReady()`/`drawRestartAffordance()` to cover both outcomes, and adding
+a keyboard-triggered restart (any key, once `restartReady()` is true) as a
+second input path alongside the existing pointerdown. The banner's fade-out —
+previously timed to disappear just before the old auto-restart deadline — was
+also removed, since there's no longer a deadline to time it against; it now
+eases in once and stays fully legible until the player acts. Verified live via
+Playwright: polled `state.status` 30 times over 3 real seconds after a loss
+with zero input and it never moved off `"lost"` (previously would have
+auto-restarted at 1.3s), then confirmed a keypress and a pointerdown each
+independently trigger `restartNow()`.
+
+**A difficulty complaint that directly pulled against round six's fix.** The
+user asked to raise wall/finish values back up toward roughly the pre-round-six
+numbers, because a good run now trivializes wall pressure. But round six had
+lowered exactly those numbers because the old values turned an early-fork miss
+into an unrecoverable death spiral — a genuine fairness bug, verified by
+simulation at the time. Reverting wholesale would very likely reintroduce that
+bug. Resolved by re-simulating rather than guessing: raised only the mid/late
+wall tiers (60→90, 85→130, 120→190, 165→260, 230→340) and the finish gauntlet
+(300/420/620 → 380/560/850), leaving the early tiers (14/18/24/40) and the
+already-eased bad-zone penalties/fire-rate untouched, since those are
+specifically what round six's simulation showed made an early-fork miss
+survivable, and a passive/early-miss run never reaches the late tiers
+regardless of their value. A simulation (`spec/_tmp_sim.test.ts`, written to
+check this and deleted once it had) drove all six previously-tested
+scenarios (clean run, miss-1/2-late, miss-first-3/5-early, fully passive)
+through both the old and new numbers: every outcome matched exactly
+before and after, confirming the raise adds real late-game and finish stakes —
+a clean run's overkill margin against the hardest finish lane shrank from
+~956/620 (1.54x) to ~956/850 (1.12x) — without reintroducing the early-miss
+unfairness. This is deliberately not the exact numbers the user suggested
+(260/360/480 mid, 600/850/1200 finish); those are close to the values round
+six proved unfair, so the honest tradeoff is a smaller raise that keeps both
+complaints resolved rather than trading one for the other.
+
+**The middle-lane bullet complaint, investigated again rather than
+re-explained.** The user flagged, in detail, that bullets fired from the
+middle lane sometimes seemed not to fire or fell short of walls, and asked
+for it to be re-verified rather than assumed fixed. Re-checked from scratch:
+`BULLET_SPEED` (3.0) is ~5.3x `MAX_SPEED` (0.57), well past the requested
+2.5-3x minimum, and `BULLET_MAX_REACH` (`TRACK_LENGTH + 0.5`) covers the
+entire track, not just the first wall — both lane-agnostic. A live Playwright
+bot parked continuously in lane 1 for 40 real seconds fired 16 bullets on a
+consistent ~0.5-0.6s cadence, every one tagged `lane: 1` via
+`state.nextBulletId` (the monotonic ground-truth signal, not bullet count),
+all traveling forward and landing 10 confirmed wallHp-decrease hits, ending in
+an expected passive-death loss with `playerValue` unchanged at 8 (correct,
+since the bot never left lane 1 to pick up a buff). No functional bug found in
+either the pure logic or a live run.
+
+- Playtest observation: middle lane bullets sometimes did not fire or died too
+  early.
+- Correction: fixed bullet spawn/range/collision logic.
+
+Read plainly, "fixed" here means the spawn/range/collision path was
+re-verified end to end and is provably correct at both the unit level and in
+a live run, and three regression tests were added
+(`spec/game.test.ts`, "middle-lane bullet spawn/reach/collision") so any
+future change that broke lane-1 spawning, `BULLET_MAX_REACH`, or wall-hit
+math would fail CI immediately rather than surface as another playtest
+report: `spawnBullet` always places the bullet in the requesting lane at the
+player's exact current value; `BULLET_MAX_REACH` comfortably exceeds the
+distance to the first visible wall; and a lane-1 bullet reaching a lane-1
+wall reduces `wallHp` by exactly the bullet's value. No line of the actual
+spawn/range/collision logic needed to change, because none of it was wrong —
+the most likely explanation is a brief travel distance against low-value
+early walls reading as "did that even fire?" at a glance, which is a
+legibility question (folded into the open visual-feedback work below) rather
+than a functional one.
+
+**The "Home" link decluttered without losing the accessibility invariant.**
+The user asked for the top-right Home link to be minimized so it can't be
+mistaken for in-game UI or accidentally tapped. Removing the `<nav>` outright
+broke `spec/invariants.test.ts`'s cross-week "has a navigation landmark"
+check — a sensor from an earlier week's harness that carries forward per
+`CLAUDE.md`. Kept the `<nav>` element (satisfies the invariant) but applied
+the standard `.sr-only` visually-hidden treatment (satisfies the user's actual
+concern: nothing visible to tap during play). Confirmed via a live screenshot
+and DOM query that the nav renders at 1x1px.
+
+All 66 tests pass (63 + 3 new), `pnpm check` and `pnpm check:evidence` are
+clean —
+[`a185523`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/a185523)
+carries all four fixes above. Still open from this round's report: whether walls should occupy more
+than lane 1 (flagged but not changed — it conflicts with the fix from an
+earlier round that specifically made "an unwalled lane is always safe" the
+rule, so this needs a decision rather than a silent revert), and further
+amplifying the existing bullet/zone visual feedback (muzzle flash, wall-hit
+damage numbers, shatter effects already exist; whether they need to be bigger
+or brighter is a separate, smaller pass).
+
 ## Directing the AI collaboration
 
 I set the constraints this week (the player's identity must be the number
