@@ -680,6 +680,46 @@ by the middle lane being left alone.
 All five fixes, `pnpm check`/`pnpm check:evidence` clean —
 [`1933267`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/1933267).
 
+**Round nine: bullets stalling after breaking a wall, traced to a
+carcass-collision bug.** *"碎墙后貌似子弹不能继续往后发射，必须等到下一个增益减益效果通过后才能到达
+下一个墙"* — after a wall breaks, bullets seem to stop firing forward until the
+next buff/debuff zone passes. Root cause, found by reading `step()`'s
+per-bullet crossing loop rather than guessing from the symptom: a bullet
+reaching a wall in its lane was always marked "spent" and removed, with no
+check for whether that wall's live `wallHp` was already 0. Once the first
+wall in a lane was destroyed, every bullet fired afterward died uselessly at
+that exact spot instead of flying on — unable to pre-chip (or even reach) any
+later wall in that lane for the rest of the run. Fixed with a one-line guard:
+a bullet only gets consumed by a wall that's still standing
+(`!isWallDestroyed(wallHp[...])`); against an already-destroyed wall it flies
+straight through and keeps resolving forward.
+
+Proving this as a genuine regression, not a coincidence, took two attempts.
+The first regression test drove the real level end to end and asserted the
+second wall in a lane took *some* damage — it passed even against the
+unfixed code, because a player who has *physically* passed a wall spawns new
+bullets whose own resolution already starts past that wall's index, skipping
+the dead carcass entirely regardless of the bug; the bug only bites bullets
+already in flight before the player gets there. The test that actually
+isolates the bug constructs a single frame directly: one bullet in flight
+just short of an already-destroyed wall, the player still short of it too,
+and a `dt` large enough for that one bullet to reach the *next* wall in the
+same frame. Confirmed by reverting only `game.ts` (`git stash push --
+game.ts`) and rerunning: the isolated test failed as expected (second wall's
+hp stayed at its full, untouched value) against the unfixed code, then passed
+once the stash was restored.
+
+The fix legitimately raises the level's difficulty for a passive,
+never-switch-lanes strategy: passive bullet chip used to run out of steam at
+the wall valued 40 (unit 4.1) because everything past the first destroyed
+wall was uneffective; it now keeps pre-chipping walls it never used to touch
+and runs out of steam three walls later, at the wall valued 105 (unit 4.9)
+instead. The existing balance test asserting where that strategy dies was
+updated to match — not loosened as a convenience, but corrected because its
+old bound encoded the bug's own limitation as if it were intended behavior.
+`pnpm check`/`pnpm check:evidence` clean, all 67 tests passing —
+[`0fea30e`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/0fea30e).
+
 ## Directing the AI collaboration
 
 I set the constraints this week (the player's identity must be the number
