@@ -413,13 +413,15 @@ describe("the hand-authored level, driven end to end through the real level data
     return state;
   }
 
-  // Every non-finish wall lives in lane 1 (see game.ts's header comment: "a
-  // lane with no wall is always safe to pass through untouched") — so a
-  // "reasonable" run doesn't abandon lane 1 forever after the first side
-  // pickup, it detours out to a fork just long enough to grab the beneficial
-  // zone (whichever lane that happens to be this fork — see
-  // beneficialForkVisits above), then returns to lane 1 in time to face (or,
-  // via its own bullets, pre-chip) the next wall.
+  // Round eight added side-lane walls at the same atUnits as every existing
+  // (lane 1) wall, softer in the beneficial lane and harsher in the
+  // punishing one (see game.ts's FORK_TIERS wallGoodValue/wallBadValue) — but
+  // lane 1's own wall value is untouched, so this "reasonable" driver (detour
+  // out to a fork just long enough to grab the beneficial zone, then return
+  // to lane 1 before the wall) still exercises exactly the same numbers it
+  // always did and is unaffected by that change. spec/_tmp_sim.test.ts (see
+  // PROCESS.md) covers the new "stay in the lane through its wall" scenarios
+  // this driver deliberately doesn't attempt.
   const FORK_VISITS = beneficialForkVisits();
 
   function zigzag(
@@ -436,7 +438,7 @@ describe("the hand-authored level, driven end to end through the real level data
     };
   }
 
-  it("wins by collecting every visible bonus, dodging every danger zone, and beating the middle finish wall (560)", () => {
+  it("wins by collecting every visible bonus, dodging every danger zone, and beating the middle finish wall (650)", () => {
     const final = drivePath(zigzag(FORK_VISITS, 1));
     expect(final.status).toBe("won");
   });

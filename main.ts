@@ -116,6 +116,13 @@ resize();
 
 let state: GameState = createInitialState();
 let desiredLane: Lane = state.lane;
+// Playtest report: the run used to start scrolling the instant the page
+// loaded, before the player had even oriented themselves — the world now
+// holds still (idle bob/tilt keeps playing, nothing scores) until either the
+// player's first input arrives, or READY_HOLD_S elapses as a fallback so a
+// confused/undiscovered-controls player isn't stuck on a frozen screen.
+let started = false;
+const READY_HOLD_S = 0.9;
 let best = 0;
 let resultAt: number | null = null;
 let idleT = 0;
@@ -185,6 +192,7 @@ const DRAG_THRESHOLD_PX = 14;
 
 canvas.addEventListener("pointerdown", (e) => {
   e.preventDefault();
+  started = true;
   pointerDown = true;
   dragged = false;
   dragStartX = e.clientX;
@@ -220,9 +228,11 @@ window.addEventListener(
     }
     if (e.code === "ArrowLeft" || e.code === "KeyA") {
       e.preventDefault();
+      started = true;
       requestLane(desiredLane - 1);
     } else if (e.code === "ArrowRight" || e.code === "KeyD") {
       e.preventDefault();
+      started = true;
       requestLane(desiredLane + 1);
     }
   },
@@ -965,16 +975,21 @@ function drawPlayerDigit(W: number, H: number): void {
 // converges toward that same on-road spot right as it's collected, and a
 // world-space number there would fight it for legibility at exactly the
 // moment both need to be read.
+// Playtest report: this used to render at near-player-digit size with a heavy
+// glow, so the top HUD, the on-road player digit, wall labels and bullet
+// badges all read as four competing numbers. This is now a small status
+// readout only — the on-road digit (drawPlayerDigit) stays the largest,
+// unambiguous "this is you" element.
 function drawPlayerHud(W: number): void {
   if (state.status === "won" || state.status === "lost") return;
   ctx!.save();
-  ctx!.fillStyle = "#123";
-  ctx!.shadowColor = "rgba(120,190,255,0.85)";
-  ctx!.shadowBlur = 20;
-  ctx!.font = `800 ${Math.max(28, W * 0.032)}px system-ui, sans-serif`;
+  ctx!.fillStyle = "rgba(20,40,70,0.55)";
+  ctx!.shadowColor = "rgba(120,190,255,0.5)";
+  ctx!.shadowBlur = 4;
+  ctx!.font = `700 ${Math.max(13, W * 0.015)}px system-ui, sans-serif`;
   ctx!.textAlign = "center";
   ctx!.textBaseline = "middle";
-  ctx!.fillText(String(state.playerValue), W / 2, 58);
+  ctx!.fillText(String(state.playerValue), W / 2, 52);
   ctx!.restore();
 }
 
@@ -1047,11 +1062,31 @@ function drawArrow(x: number, y: number, r: number, alpha: number): void {
   ctx!.restore();
 }
 
+// Playtest report: the trail only ever showed the arrow shape — the bullet's
+// carried digit itself had no motion cue, so it read as flat/static next to
+// the wall and player digits. Faded ghost copies of the digit badge (no
+// stroke, no glow — just a soft afterimage) now trail behind the live one.
+function drawBulletDigitGhost(x: number, y: number, r: number, value: number, badgeColor: string, alpha: number): void {
+  ctx!.save();
+  ctx!.globalAlpha = alpha;
+  ctx!.fillStyle = badgeColor;
+  ctx!.beginPath();
+  ctx!.ellipse(x, y, r, r * 0.86, 0, 0, Math.PI * 2);
+  ctx!.fill();
+  ctx!.fillStyle = "rgba(255,255,255,0.85)";
+  ctx!.font = `800 ${Math.max(7, r * 1.1)}px system-ui, sans-serif`;
+  ctx!.textAlign = "center";
+  ctx!.textBaseline = "middle";
+  ctx!.fillText(String(value), x, y);
+  ctx!.restore();
+}
+
 function drawBullets(W: number, H: number): void {
   for (const b of state.bullets) {
     const style = bulletBadgeStyle(b);
 
-    // fading trail stamps (the plane's own past positions)
+    // fading trail stamps (the plane's own past positions), now with a
+    // ghosted digit badge riding each one, not just the arrow shape
     for (const trailBack of [0.16, 0.09]) {
       const distanceAhead = b.atUnits - trailBack - state.worldX;
       if (!visibleAt(distanceAhead)) continue;
@@ -1060,7 +1095,10 @@ function drawBullets(W: number, H: number): void {
       const x = laneCenterX(b.lane, d, W);
       const y = yAt(d, H);
       const scale = 0.16 + 0.84 * d;
-      drawArrow(x, y, Math.max(6, 12 * scale), alpha);
+      const trailR = Math.max(6, 12 * scale);
+      drawArrow(x, y, trailR, alpha);
+      const ghostR = Math.max(6, 10 * scale) * style.scale;
+      drawBulletDigitGhost(x, y + trailR * 0.95, ghostR, b.value, style.badge, alpha);
     }
 
     const distanceAhead = b.atUnits - state.worldX;
@@ -1217,18 +1255,36 @@ function drawFinishWarning(W: number, H: number): void {
   ctx!.restore();
 }
 
+// Playtest report: this used to be a 4px, low-contrast sliver that read as
+// barely-there — by mid-run the game felt like an infinite runner with no
+// sense of an approaching finish. Thicker, higher-contrast bar, plus a tick
+// per wall so the bar reads as a visible sequence of gates ahead, not a
+// featureless track. Still no text/labels, per the "no tutorial needed" ask.
+const PROGRESS_TICK_UNITS = [...new Set(OBSTACLES.filter((o) => o.type === "wall").map((o) => o.atUnits))].sort(
+  (a, b) => a - b,
+);
 function drawProgress(W: number): void {
-  const barH = 4;
+  const barH = 7;
   const margin = 18;
   const trackW = W - margin * 2;
   const frac = Math.min(1, state.worldX / TRACK_LENGTH);
-  ctx!.fillStyle = "rgba(20, 40, 70, 0.15)";
-  ctx!.fillRect(margin, 10, trackW, barH);
-  ctx!.fillStyle = "rgba(87, 224, 160, 0.9)";
-  ctx!.fillRect(margin, 10, trackW * frac, barH);
+  const y = 10;
+  ctx!.fillStyle = "rgba(20, 40, 70, 0.28)";
+  ctx!.fillRect(margin, y, trackW, barH);
+  ctx!.fillStyle = "rgba(20, 40, 70, 0.5)";
+  for (const u of PROGRESS_TICK_UNITS) {
+    const tx = margin + trackW * Math.min(1, u / TRACK_LENGTH);
+    ctx!.fillRect(tx - 0.75, y - 2, 1.5, barH + 4);
+  }
+  ctx!.save();
+  ctx!.fillStyle = "rgba(87, 224, 160, 0.95)";
+  ctx!.shadowColor = "rgba(87, 224, 160, 0.7)";
+  ctx!.shadowBlur = 5;
+  ctx!.fillRect(margin, y, trackW * frac, barH);
+  ctx!.restore();
   if (best > 0.001) {
     ctx!.fillStyle = "rgba(255, 176, 60, 0.9)";
-    ctx!.fillRect(margin + trackW * best - 1, 6, 2, barH + 8);
+    ctx!.fillRect(margin + trackW * best - 1, y - 4, 2, barH + 8);
   }
 }
 
@@ -1392,6 +1448,7 @@ function restartNow(): void {
   best = Math.max(best, state.worldX / TRACK_LENGTH);
   state = createInitialState();
   desiredLane = state.lane;
+  started = false;
   resultAt = null;
   idleT = 0;
   prevBulletResolvedUpTo = new Map();
@@ -1418,7 +1475,11 @@ function frame(t: number): void {
 
   if (state.status === "won" || state.status === "lost") {
     if (resultAt === null) resultAt = t;
+  } else if (!started && idleT < READY_HOLD_S) {
+    // Pre-roll hold: world/bullets stay frozen (idle bob/tilt keeps playing)
+    // until the player's first input, or this fallback beat elapses.
   } else {
+    started = true;
     const prevResolvedUpTo = state.resolvedUpTo;
     const prevStatus = state.status;
     const prevWallHp = state.wallHp;

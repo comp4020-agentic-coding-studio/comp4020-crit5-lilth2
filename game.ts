@@ -3,10 +3,9 @@
 //
 // The one rule: your current number vs. the number on the wall in front of
 // you. Big enough (>=) and you smash through and keep going; not big enough
-// and you crash — game over. A lane with no wall is always safe to pass
-// through untouched. Everything else (the lane-runner shell, the finish
-// gauntlet, the difficulty ramp) is built on that single comparison, repeated
-// with bigger numbers.
+// and you crash — game over. Everything else (the lane-runner shell, the
+// finish gauntlet, the difficulty ramp) is built on that single comparison,
+// repeated with bigger numbers.
 //
 // The player auto-fires digit bullets down their current lane, and every
 // bullet's power equals playerValue *at the moment it was fired* — a bullet
@@ -213,7 +212,12 @@ export const SPAWN_AHEAD = 0.03;
 interface ForkTier {
   atUnits: number;
   wallAtUnits?: number;
+  /** The lane-1 (neutral/duck-back) wall's value — unchanged by the round eight multi-lane change below. */
   wallValue?: number;
+  /** The wall a run that commits to (and stays in) the beneficial lane faces — softer than wallValue. */
+  wallGoodValue?: number;
+  /** The wall a run that commits to (and stays in) the punishing lane faces — harsher than wallValue. */
+  wallBadValue?: number;
   good: { kind: ZoneKind; value: number };
   bad: { kind: ZoneKind; value: number };
 }
@@ -230,17 +234,104 @@ interface ForkTier {
 // same overkill margin, while leaving the early tiers (14/18/24/40) and the
 // bad-zone penalties/fire-rate untouched, since simulation showed those are
 // what made an early-fork miss survivable — see PROCESS.md.
+// Round eight: two more playtest reports. (1) Ducking into the beneficial
+// lane just long enough to grab its zone, then always returning to lane 1
+// before the wall, made lane 1 a totally free escape from every wall in the
+// level — reported as "walls should cover multiple lanes." wallGoodValue/
+// wallBadValue below extend every existing wall to the side lanes too (same
+// atUnits, same pattern the finish gauntlet already used), so staying in
+// whichever lane you picked now means facing a real (softer-but-real, or
+// harsher) number there instead of a guaranteed dodge. Lane 1's own value
+// (wallValue) is untouched, so the early-fork-miss/passive-play protection
+// simulated in round six still holds exactly as before — that path never
+// visits the new side-lane walls at all. (2) A further difficulty raise was
+// requested on top of round seven's; mid/late lane-1 walls (5,6,7,8,10) and
+// the finish gauntlet are raised again (~15%), early tiers (1-4) again left
+// untouched for the same reason. All of this re-verified via
+// spec/_tmp_sim.test.ts before shipping — see PROCESS.md.
 const FORK_TIERS: readonly ForkTier[] = [
-  { atUnits: 1.35, wallAtUnits: 1.7, wallValue: 14, good: { kind: "add", value: 18 }, bad: { kind: "add", value: -3 } },
-  { atUnits: 2.1, wallAtUnits: 2.5, wallValue: 18, good: { kind: "add", value: 14 }, bad: { kind: "add", value: -4 } },
-  { atUnits: 2.9, wallAtUnits: 3.3, wallValue: 24, good: { kind: "add", value: 14 }, bad: { kind: "add", value: -5 } },
-  { atUnits: 3.7, wallAtUnits: 4.1, wallValue: 40, good: { kind: "add", value: 40 }, bad: { kind: "add", value: -8 } },
-  { atUnits: 4.5, wallAtUnits: 4.9, wallValue: 90, good: { kind: "mul", value: 2 }, bad: { kind: "div", value: 2 } },
-  { atUnits: 5.3, wallAtUnits: 5.7, wallValue: 130, good: { kind: "add", value: 30 }, bad: { kind: "add", value: -15 } },
-  { atUnits: 6.1, wallAtUnits: 6.5, wallValue: 190, good: { kind: "add", value: 60 }, bad: { kind: "add", value: -20 } },
-  { atUnits: 6.9, wallAtUnits: 7.3, wallValue: 260, good: { kind: "add", value: 100 }, bad: { kind: "add", value: -25 } },
+  {
+    atUnits: 1.35,
+    wallAtUnits: 1.7,
+    wallValue: 14,
+    wallGoodValue: 8,
+    wallBadValue: 21,
+    good: { kind: "add", value: 18 },
+    bad: { kind: "add", value: -3 },
+  },
+  {
+    atUnits: 2.1,
+    wallAtUnits: 2.5,
+    wallValue: 18,
+    wallGoodValue: 10,
+    wallBadValue: 27,
+    good: { kind: "add", value: 14 },
+    bad: { kind: "add", value: -4 },
+  },
+  {
+    atUnits: 2.9,
+    wallAtUnits: 3.3,
+    wallValue: 24,
+    wallGoodValue: 13,
+    wallBadValue: 36,
+    good: { kind: "add", value: 14 },
+    bad: { kind: "add", value: -5 },
+  },
+  {
+    atUnits: 3.7,
+    wallAtUnits: 4.1,
+    wallValue: 40,
+    wallGoodValue: 22,
+    wallBadValue: 60,
+    good: { kind: "add", value: 40 },
+    bad: { kind: "add", value: -8 },
+  },
+  {
+    atUnits: 4.5,
+    wallAtUnits: 4.9,
+    wallValue: 105,
+    wallGoodValue: 58,
+    wallBadValue: 158,
+    good: { kind: "mul", value: 2 },
+    bad: { kind: "div", value: 2 },
+  },
+  {
+    atUnits: 5.3,
+    wallAtUnits: 5.7,
+    wallValue: 150,
+    wallGoodValue: 83,
+    wallBadValue: 225,
+    good: { kind: "add", value: 30 },
+    bad: { kind: "add", value: -15 },
+  },
+  {
+    atUnits: 6.1,
+    wallAtUnits: 6.5,
+    wallValue: 220,
+    wallGoodValue: 121,
+    wallBadValue: 330,
+    good: { kind: "add", value: 60 },
+    bad: { kind: "add", value: -20 },
+  },
+  {
+    atUnits: 6.9,
+    wallAtUnits: 7.3,
+    wallValue: 300,
+    wallGoodValue: 165,
+    wallBadValue: 450,
+    good: { kind: "add", value: 100 },
+    bad: { kind: "add", value: -25 },
+  },
   { atUnits: 7.7, good: { kind: "mul", value: 2 }, bad: { kind: "div", value: 2 } },
-  { atUnits: 8.1, wallAtUnits: 8.5, wallValue: 340, good: { kind: "rate", value: 0 }, bad: { kind: "add", value: -40 } },
+  {
+    atUnits: 8.1,
+    wallAtUnits: 8.5,
+    wallValue: 390,
+    wallGoodValue: 215,
+    wallBadValue: 585,
+    good: { kind: "rate", value: 0 },
+    bad: { kind: "add", value: -40 },
+  },
   { atUnits: 8.9, good: { kind: "add", value: 150 }, bad: { kind: "add", value: -50 } },
   { atUnits: 9.3, good: { kind: "add", value: 50 }, bad: { kind: "div", value: 2 } },
 ];
@@ -260,11 +351,17 @@ function buildLevel(): Obstacle[] {
     obstacles.push({ type: "zone", atUnits: tier.atUnits, lane: badLane, ...tier.bad });
     if (tier.wallAtUnits !== undefined && tier.wallValue !== undefined) {
       obstacles.push({ type: "wall", atUnits: tier.wallAtUnits, lane: 1, value: tier.wallValue });
+      if (tier.wallGoodValue !== undefined) {
+        obstacles.push({ type: "wall", atUnits: tier.wallAtUnits, lane: goodLane, value: tier.wallGoodValue });
+      }
+      if (tier.wallBadValue !== undefined) {
+        obstacles.push({ type: "wall", atUnits: tier.wallAtUnits, lane: badLane, value: tier.wallBadValue });
+      }
     }
   });
-  obstacles.push({ type: "wall", atUnits: 9.7, lane: 0, value: 380, isFinish: true });
-  obstacles.push({ type: "wall", atUnits: 9.7, lane: 1, value: 560, isFinish: true });
-  obstacles.push({ type: "wall", atUnits: 9.7, lane: 2, value: 850, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 0, value: 440, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 1, value: 650, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 2, value: 980, isFinish: true });
   return obstacles;
 }
 
