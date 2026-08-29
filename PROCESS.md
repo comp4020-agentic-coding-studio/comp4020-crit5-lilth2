@@ -319,6 +319,112 @@ Playwright visual-check scripts written to confirm the render-level fixes
 are deleted once this section captured their findings, per the same
 "verify, then discard the harness" pattern every prior round has followed.
 
+## Round five: real playtest bug reports, a full render-clutter pass, and randomized forks
+
+This round's brief came from two sources at once: the crit's own list of five
+rendering/UX complaints (no explicit win/loss text; obstacle labels merging
+near the vanishing point; finish-lane wall labels stuck on the win screen; the
+result-flash tint washing the whole scene; the loss shatter scattering the
+player's own digit as if removing them one digit at a time), plus two bugs the
+brief said came from *actually playing it* ("有时子弹发射不出去" — bullets
+sometimes don't fire; "设置墙不是只在一个道路上 是全部都在 无法躲过" — walls
+aren't in just one lane, they're in all of them, with no way to dodge), and a
+request to randomize which lane gets the buff vs. the debuff at each fork.
+
+**The two playtest reports were both legibility bugs, not logic bugs.**
+Reading `step()` and the fork data before touching rendering: bullets were
+firing correctly every `BULLET_FIRE_INTERVAL` the whole time (confirmed by
+polling `window.__state.bullets` across a run) — the report was about *seeing*
+a shot happen, not about one failing to happen, since a bullet's launch had no
+distinct visual moment, just a constant glow that looked identical whether a
+shot had just left or not. The "walls in every lane" report is the one place
+in `OBSTACLES` that's supposed to have a wall in all three lanes at once — the
+finish gauntlet (`atUnits: 9.7`, `600`/`850`/`1200`) — which was rendering at
+the same `VIEW_DISTANCE` as any single dodgeable wall, so it read as an unfair
+ambush rather than the intended finish line. Neither got "fixed" by changing
+what the game does; both got fixed by making what it already does readable.
+
+**What changed:**
+
+- An explicit `CLEARED!`/`CRASHED` banner (`drawResultBanner`), the first
+  point in the whole build where the outcome is stated in words rather than
+  inferred from color and particles.
+- Obstacle labels only render once their on-screen perspective scale crosses
+  `LABEL_REVEAL_SCALE = 0.5` — far-away obstacles in different lanes still
+  converge toward the same point on screen, and their printed values were
+  merging into unreadable glyph-soup (`"598"` + `"50"` → `"59850"`) before
+  they were actually spaced apart.
+- A shared `resultFade()` (ramping 1→0 over the first 500ms of the win/loss
+  hold) now drives the player digit's fade **and** every obstacle's alpha —
+  previously only the player faded, so the two untouched finish-lane walls
+  just sat there with their hp labels clumped at the bottom of the win screen
+  for the entire hold.
+- `drawResultFlash`'s flat full-canvas tint became an edge-only radial
+  vignette, fully clear through the center third of the frame — same
+  win/loss color cue at the rim, without dulling the banner/player digit the
+  eye is actually looking at.
+- The player's own loss shatter now spawns generic angular red/gray debris
+  (`spawnLossShards`) instead of `spawnDigitFragments` on the player's current
+  value — the old version visibly peeled the player's own printed digits off
+  one at a time, implying a per-digit-removal mechanic the game doesn't have.
+- A muzzle-flash pulse (`muzzleFlash`, tracked by the highest `Bullet.id` seen
+  so far, not array length — a bullet leaving the array on resolution must
+  not read as a new shot) flares the cannon glow white for ~180ms the instant
+  a new bullet is actually fired, giving "you just shot" a distinct beat
+  instead of one constant glow.
+- A `drawFinishWarning` banner telegraphs the finish gauntlet well before it
+  enters the normal render window, ramping in over `FINISH_WARN_DISTANCE`
+  track units. First tried at `7.5`: a Playwright playtest screenshot caught
+  it fully visible at only ~23% into the run (`TRACK_LENGTH` is `9.7`, so a
+  window that size kept the banner up for most of the level, not just the
+  approach) — corrected to `5.0` (with base alpha lowered `0.35` → `0.15`) so
+  it starts nearly imperceptible and only becomes prominent in the last
+  stretch. Caught and corrected purely by looking at the rendered frame, not
+  by reasoning about the numbers in the abstract.
+- `FORK_BUFF_LANE`, a hand-picked (not runtime-random, so the level stays the
+  same fixed, testable track every load) sequence of which lane — 0 or 2 —
+  gets the beneficial zone at each fork, mixing sides so no more than two
+  forks in a row favor the same lane. Directly answers the "one lane is
+  always all-buff, the other always all-debuff" complaint without giving up
+  reproducibility.
+
+**A second playtest pass caught two leftover instances of the same bug
+class.** After the fixes above, I drove the build with a scripted Playwright
+bot that actually plays the level — dodging into the buff lane just before
+each fork's zone and back to the always-walled lane 1 before the wall,
+mirroring the only strategy that can grow `playerValue` enough to clear the
+later walls — specifically to force a real win, not just a quick loss, since
+the finish-only bugs below could only show up at the very end of a full run.
+That run surfaced two spots the `resultFade()` pass above had missed, both
+the exact "stuck on the result screen" bug the crit had already flagged once:
+
+1. A second, separate `state.status === "lost"` branch in `frame()` (for a
+   loss that isn't tied to resolving a new obstacle in that exact frame) was
+   still calling `spawnDigitFragments(fx, fy, state.playerValue, ...)` — the
+   literal bug point 5 above was supposed to remove, just reachable from a
+   different code path than the one already fixed. Switched to the same
+   `spawnLossShards` as the primary loss branch.
+2. `drawFinishCluster` — the decorative cloud of digits hovering near the
+   horizon that previews the finish gauntlet's numbers as it approaches — has
+   its own `distanceAhead`-only alpha, entirely separate from `resultFade()`.
+   Since `distanceAhead` sits at ~0 right at the finish, the cluster stayed
+   at full brightness for the *entire* result hold, floating over the
+   `CLEARED!`/`CRASHED` banner. This was the actual cause of what first
+   looked like leftover particle debris in a playtest screenshot before
+   tracing it to a rendering path with no connection to the fade system at
+   all. Fixed by multiplying its alpha by `resultFade()` too, and, since the
+   same screenshot showed wall-hit digit-fragment particles (a separate,
+   correctly-short-lived system) still visibly mid-fade into the result
+   screen, `resultFade()` now also multiplies every particle's own
+   life-based alpha, so nothing spawned right at the moment of impact
+   outlives the banner it's competing with.
+
+Re-verified with a fresh win run after both fixes: the `CLEARED!` banner at
++500ms into the hold renders against a completely clear sky, no stray digits,
+no lingering particles. All six scratch Playwright scripts used to drive
+these playtests are deleted once this section captured their findings, same
+as every prior round.
+
 ## Directing the AI collaboration
 
 I set the constraints this week (the player's identity must be the number

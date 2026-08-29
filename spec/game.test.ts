@@ -25,6 +25,26 @@ import {
   type Zone,
 } from "../game";
 
+// Which physical lane (0 or 2) carries the beneficial zone varies per fork
+// (see game.ts's FORK_BUFF_LANE) instead of always being lane 2 — so a
+// "reasonable run" test has to look up, per fork, which lane is actually
+// beneficial from the real OBSTACLES data rather than assuming one side.
+function beneficialForkVisits(): { at: number; lane: 0 | 1 | 2 }[] {
+  const byAt = new Map<number, Zone[]>();
+  for (const ob of OBSTACLES) {
+    if (ob.type !== "zone" || ob.lane === 1) continue; // skip the always-safe lane-1 teaching gate
+    const list = byAt.get(ob.atUnits) ?? [];
+    list.push(ob);
+    byAt.set(ob.atUnits, list);
+  }
+  const visits: { at: number; lane: 0 | 1 | 2 }[] = [];
+  for (const [at, zones] of byAt) {
+    const beneficial = zones.find((z) => z.kind === "mul" || z.kind === "rate" || (z.kind === "add" && z.value > 0));
+    if (beneficial) visits.push({ at, lane: beneficial.lane });
+  }
+  return visits.sort((a, b) => a.at - b.at);
+}
+
 // The core rule under test: your number vs. the wall's number. Big enough
 // and you smash through; not big enough and the round ends in a loss. A wall
 // in a lane you're not in never touches you at all — it's a dodge, not a
@@ -342,23 +362,10 @@ describe("the hand-authored level, driven end to end through the real level data
   // lane with no wall is always safe to pass through untouched") — so a
   // "reasonable" run doesn't abandon lane 1 forever after the first side
   // pickup, it detours out to a fork just long enough to grab the beneficial
-  // zone, then returns to lane 1 in time to face (or, via its own bullets,
-  // pre-chip) the next wall. These are the same fork windows validated by
-  // scripts/balance-sim.ts's "reasonable" driver.
-  const FORK_VISITS: { at: number; lane: 0 | 1 | 2 }[] = [
-    { at: 1.35, lane: 2 }, // grab +18, skip -8
-    { at: 2.1, lane: 2 }, // grab +14, skip -10
-    { at: 2.9, lane: 2 }, // grab +14, skip -12
-    { at: 3.7, lane: 2 }, // grab +40, skip -20
-    { at: 4.5, lane: 2 }, // grab x2, skip ÷2
-    { at: 5.3, lane: 2 }, // grab +30, skip -40
-    { at: 6.1, lane: 2 }, // grab +60, skip -50
-    { at: 6.9, lane: 2 }, // grab +100, skip -60
-    { at: 7.7, lane: 2 }, // grab x2, skip ÷2
-    { at: 8.1, lane: 2 }, // grab RATE+, skip -100
-    { at: 8.9, lane: 2 }, // grab +150, skip -120
-    { at: 9.3, lane: 2 }, // grab +50, skip ÷2
-  ];
+  // zone (whichever lane that happens to be this fork — see
+  // beneficialForkVisits above), then returns to lane 1 in time to face (or,
+  // via its own bullets, pre-chip) the next wall.
+  const FORK_VISITS = beneficialForkVisits();
 
   function zigzag(
     visits: { at: number; lane: 0 | 1 | 2 }[],

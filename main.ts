@@ -122,6 +122,13 @@ let idleT = 0;
 let particles: Particle[] = [];
 let playerFx: PlayerFx | null = null;
 let now = performance.now();
+// Time since the player's own cannon last actually fired a new bullet (null =
+// no recent shot) — drives the muzzle-flash flare in drawPlayerDigit. Tracked
+// by the highest Bullet.id seen so far rather than array length, since a
+// bullet leaving the array (resolved/off-screen) must not itself look like a
+// new shot.
+let muzzleFlash: number | null = null;
+let lastFiredBulletId = -1;
 
 // Bullet-id -> last-seen resolvedUpTo, so advancing past a zone can be
 // diffed frame to frame (mirroring the player's own prevResolvedUpTo diff
@@ -143,6 +150,18 @@ let gatePulse = new Map<number, number>();
 let wallShatter = new Map<number, number>();
 
 const RESULT_HOLD_MS = 1300;
+// Shared by the player digit AND every obstacle draw during a win/loss hold:
+// ramps 1 -> 0 over the first RESULT_FADE_MS of the hold. Obstacles need this
+// too, not just the player — a playtest found the untouched finish-lane walls
+// (the two lanes the player didn't drive through) just sit there with their
+// hp labels clumped at the bottom of the screen for the entire 1300ms hold,
+// since only the player digit used to fade at all.
+const RESULT_FADE_MS = 500;
+function resultFade(): number {
+  if (state.status !== "won" && state.status !== "lost") return 1;
+  if (resultAt === null) return 1;
+  return clamp(1 - (now - resultAt) / RESULT_FADE_MS, 0, 1);
+}
 
 function requestLane(lane: number): void {
   desiredLane = clamp(lane, 0, LANES - 1) as Lane;
@@ -265,6 +284,35 @@ function spawnConfetti(x: number, y: number, count: number): void {
       shape: "rect",
       rot: Math.random() * Math.PI * 2,
       vrot: (Math.random() - 0.5) * 12,
+    });
+  }
+}
+
+/** Angular red/gray debris for the player's own loss shatter. Deliberately
+ *  NOT spawnDigitFragments (which scatters an obstacle's printed value as
+ *  flying digit glyphs) — doing that with the player's own current value
+ *  reads as "your digits are being peeled off one at a time," implying a
+ *  per-digit-removal mechanic the game doesn't actually have. This is plain
+ *  shatter debris instead, same visual family as a destroyed wall's glass
+ *  shards but tinted for "you," not "the obstacle." */
+function spawnLossShards(x: number, y: number, count: number): void {
+  const palette = ["#ff5064", "#ffb0ba", "#8891a1"];
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 110 + Math.random() * 260;
+    const life = 0.5 + Math.random() * 0.5;
+    particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 100,
+      life,
+      maxLife: life,
+      color: palette[i % palette.length],
+      r: 4 + Math.random() * 6,
+      shape: "rect",
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 14,
     });
   }
 }
@@ -464,16 +512,29 @@ function labelFor(ob: Obstacle): string {
   return ob.value >= 0 ? `+${ob.value}` : String(ob.value);
 }
 
+// Lanes converge toward a single point at the horizon, so two obstacles in
+// different lanes (a wall's hp label and a neighbouring zone's operator
+// label, say) can sit almost on top of each other on screen while they're
+// still far away — the exact "598"+"50" merging into "59850" glyph-soup a
+// playtest turned up. Below this scale (lanes are still narrow on screen),
+// obstacles render as their plain glowing shape only — still enough to read
+// "buff" vs "trap" by color from a distance — and the numeric label pops in
+// once the obstacle is close enough that adjacent lanes are actually spaced
+// apart on screen.
+const LABEL_REVEAL_SCALE = 0.5;
+
 function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
   const distanceAhead = ob.atUnits - state.worldX;
   if (!visibleAt(distanceAhead)) return;
   const d = depthOf(distanceAhead);
-  const alpha = fadeAlpha(distanceAhead);
+  const alpha = fadeAlpha(distanceAhead) * resultFade();
+  if (alpha <= 0.01) return;
   const x = laneCenterX(ob.lane, d, W);
   const y = yAt(d, H);
   const roadWidth = roadHalfWidthAt(d, W) * 2;
   const laneWidth = roadWidth / LANES;
   const scale = 0.16 + 0.84 * d;
+  const showLabel = scale >= LABEL_REVEAL_SCALE;
 
   ctx!.save();
   ctx!.globalAlpha = alpha;
@@ -549,14 +610,16 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
       ctx!.stroke();
     }
 
-    ctx!.fillStyle = "#0e2a3a";
-    ctx!.strokeStyle = "rgba(255,255,255,0.9)";
-    ctx!.lineWidth = Math.max(1, 3 * scale);
-    ctx!.font = `800 ${Math.max(11, 23 * scale)}px system-ui, sans-serif`;
-    ctx!.textAlign = "center";
-    ctx!.textBaseline = "middle";
-    ctx!.strokeText(String(hp), x, y - h / 2);
-    ctx!.fillText(String(hp), x, y - h / 2);
+    if (showLabel) {
+      ctx!.fillStyle = "#0e2a3a";
+      ctx!.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx!.lineWidth = Math.max(1, 3 * scale);
+      ctx!.font = `800 ${Math.max(11, 23 * scale)}px system-ui, sans-serif`;
+      ctx!.textAlign = "center";
+      ctx!.textBaseline = "middle";
+      ctx!.strokeText(String(hp), x, y - h / 2);
+      ctx!.fillText(String(hp), x, y - h / 2);
+    }
   } else if (ob.type === "zone") {
     // An "energy gate" — two tinted pylons framing a pulsing field, fully
     // colored by operator kind (fill/glow/border, not just a thin border on
@@ -614,14 +677,16 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
     ctx!.stroke();
     ctx!.shadowBlur = 0;
 
-    ctx!.fillStyle = "#0e2a3a";
-    ctx!.strokeStyle = "rgba(255,255,255,0.95)";
-    ctx!.lineWidth = Math.max(1.5, 3.4 * scale);
-    ctx!.font = `800 ${Math.max(13, 24 * scale)}px system-ui, sans-serif`;
-    ctx!.textAlign = "center";
-    ctx!.textBaseline = "middle";
-    ctx!.strokeText(labelFor(ob), x, cy);
-    ctx!.fillText(labelFor(ob), x, cy);
+    if (showLabel) {
+      ctx!.fillStyle = "#0e2a3a";
+      ctx!.strokeStyle = "rgba(255,255,255,0.95)";
+      ctx!.lineWidth = Math.max(1.5, 3.4 * scale);
+      ctx!.font = `800 ${Math.max(13, 24 * scale)}px system-ui, sans-serif`;
+      ctx!.textAlign = "center";
+      ctx!.textBaseline = "middle";
+      ctx!.strokeText(labelFor(ob), x, cy);
+      ctx!.fillText(labelFor(ob), x, cy);
+    }
   } else {
     const colors = modifierColor(ob.kind, ob.value);
     const size2 = laneWidth * 0.42;
@@ -633,11 +698,13 @@ function drawObstacle(ob: Obstacle, index: number, W: number, H: number): void {
     ctx!.fill();
 
     ctx!.shadowBlur = 0;
-    ctx!.fillStyle = "#0c1420";
-    ctx!.font = `700 ${Math.max(10, 18 * scale)}px system-ui, sans-serif`;
-    ctx!.textAlign = "center";
-    ctx!.textBaseline = "middle";
-    ctx!.fillText(labelFor(ob), x, y - size2 / 2 - 10 * scale + bob);
+    if (showLabel) {
+      ctx!.fillStyle = "#0c1420";
+      ctx!.font = `700 ${Math.max(10, 18 * scale)}px system-ui, sans-serif`;
+      ctx!.textAlign = "center";
+      ctx!.textBaseline = "middle";
+      ctx!.fillText(labelFor(ob), x, y - size2 / 2 - 10 * scale + bob);
+    }
   }
 
   ctx!.restore();
@@ -733,12 +800,9 @@ function drawPlayerDigit(W: number, H: number): void {
   // (smashing bigger through a won finish wall, jolting on a lost one) then
   // fades over the first ~0.5s of RESULT_HOLD_MS, rather than cutting to the
   // walls/flash-tint with nothing marking where the player was.
-  let resultFade = 1;
-  if (inResult) {
-    if (resultAt === null) return;
-    resultFade = clamp(1 - (now - resultAt) / 500, 0, 1);
-    if (resultFade <= 0) return;
-  }
+  if (inResult && resultAt === null) return;
+  const fade = resultFade();
+  if (inResult && fade <= 0) return;
   const { x, y } = cannonPos(W, H);
   const bob = inResult ? 0 : Math.sin(idleT * 2.6) * 3;
   const laneWidth = (roadHalfWidthAt(1, W) * 2) / LANES;
@@ -752,10 +816,10 @@ function drawPlayerDigit(W: number, H: number): void {
   let electric = false;
 
   if (inResult) {
-    const punch = 1 - resultFade;
+    const punch = 1 - fade;
     if (state.status === "won") {
       face = "#ffd76a";
-      glow = `rgba(255,182,72,${0.5 + 0.5 * resultFade})`;
+      glow = `rgba(255,182,72,${0.5 + 0.5 * fade})`;
       scale = 1 + 0.4 * punch;
     } else {
       // Loss reads as one combined beat — shatter, then drain toward gray —
@@ -794,7 +858,7 @@ function drawPlayerDigit(W: number, H: number): void {
   const dark = shade(face, -0.55);
 
   ctx!.save();
-  ctx!.globalAlpha = resultFade;
+  ctx!.globalAlpha = fade;
   ctx!.translate(x, y - fontSize * 0.42 + bob);
   ctx!.rotate(tilt);
   ctx!.scale(scale, scale);
@@ -838,12 +902,27 @@ function drawPlayerDigit(W: number, H: number): void {
   ctx!.fillText(label, 0, 0);
   ctx!.shadowBlur = 0;
 
-  // small muzzle glow at the digit's base: sells "the number is shooting"
-  ctx!.fillStyle = "rgba(180,240,255,0.9)";
-  ctx!.shadowColor = "rgba(180,240,255,0.9)";
-  ctx!.shadowBlur = 10;
+  // Muzzle glow at the digit's base: sells "the number is shooting." Used to
+  // sit at one constant brightness forever, with nothing distinguishing the
+  // instant a shot actually left from any other frame — a playtest read that
+  // as "bullets don't fire" even though they were spawning on schedule the
+  // whole time. Now it flares bright white and swells for a beat right when
+  // muzzleFlash is (re)armed in frame() (a new bullet id was just seen),
+  // decaying back to the steady cyan glow over ~180ms.
+  const flareT = muzzleFlash !== null ? clamp(1 - muzzleFlash / 0.18, 0, 1) : 0;
+  ctx!.fillStyle = flareT > 0.02 ? mixHex("#b4f0ff", "#ffffff", flareT) : "rgba(180,240,255,0.9)";
+  ctx!.shadowColor = "rgba(200,245,255,0.95)";
+  ctx!.shadowBlur = 10 + 26 * flareT;
   ctx!.beginPath();
-  ctx!.ellipse(0, fontSize * 0.4, fontSize * 0.08, fontSize * 0.04, 0, 0, Math.PI * 2);
+  ctx!.ellipse(
+    0,
+    fontSize * 0.4,
+    fontSize * (0.08 + 0.14 * flareT),
+    fontSize * (0.04 + 0.07 * flareT),
+    0,
+    0,
+    Math.PI * 2,
+  );
   ctx!.fill();
 
   // RATE+ pickup: a couple of jagged electric bolts flashed around the digit,
@@ -1058,7 +1137,14 @@ const FINISH_CLUSTER = [
 function drawFinishCluster(W: number, H: number): void {
   const distanceAhead = FINISH_UNITS - state.worldX;
   if (distanceAhead > VIEW_DISTANCE || distanceAhead < -0.4) return;
-  const alpha = clamp(1 - Math.max(distanceAhead, 0) / VIEW_DISTANCE, 0, 1) * 0.85;
+  // Same resultFade() as every other on-screen element during a win/loss
+  // hold — this decorative digit-cloud has its own distanceAhead-only alpha
+  // and, missing that multiplier, was the actual source of a playtest's
+  // "stray numbers stuck in the sky over the CLEARED!/CRASHED banner"
+  // report: distanceAhead sits near 0 right at the finish, so the cluster
+  // stayed at ~full brightness for the whole result hold with nothing to
+  // fade it out alongside the obstacles and particles.
+  const alpha = clamp(1 - Math.max(distanceAhead, 0) / VIEW_DISTANCE, 0, 1) * 0.85 * resultFade();
   if (alpha <= 0.01) return;
   const y = yAt(0, H) - H * 0.015;
   const cx = W / 2;
@@ -1076,6 +1162,47 @@ function drawFinishCluster(W: number, H: number): void {
     ctx!.strokeText(f.digit, cx + f.dx * W * 0.55, y + f.dy * H * 0.5 + bob);
     ctx!.fillText(f.digit, cx + f.dx * W * 0.55, y + f.dy * H * 0.5 + bob);
   }
+  ctx!.restore();
+}
+
+// The finish gauntlet (see game.ts: the one place all 3 lanes carry a
+// simultaneous wall, by design) only became visible at the same VIEW_DISTANCE
+// as any other single-lane wall — so a run that hadn't grown big enough yet
+// had no more warning for "every lane is about to be blocked" than for a
+// completely dodgeable single obstacle, which a playtest read as an unfair
+// ambush rather than the intended finish line. This banner telegraphs it
+// from much further out (FINISH_WARN_DISTANCE), pulsing more urgently as it
+// closes, and steps aside once the gauntlet itself is close enough to read
+// on its own.
+// Only ~1.4 track units past the normal render horizon (VIEW_DISTANCE=3.6) —
+// TRACK_LENGTH is 9.7 with forks spaced across nearly all of it, so any
+// larger window would keep this banner up for most of the run instead of
+// reading as "the finish specifically is coming up." Starts almost
+// imperceptible (see the low base alpha below) and only becomes genuinely
+// prominent in the last stretch, so it doesn't dominate the screen for the
+// whole approach.
+const FINISH_WARN_DISTANCE = 5.0;
+const FINISH_WARN_NEAR_CUTOFF = 1.1;
+function drawFinishWarning(W: number, H: number): void {
+  if (state.status !== "playing") return;
+  const distanceAhead = FINISH_UNITS - state.worldX;
+  if (distanceAhead > FINISH_WARN_DISTANCE || distanceAhead < FINISH_WARN_NEAR_CUTOFF) return;
+  const closeness = clamp(1 - (distanceAhead - FINISH_WARN_NEAR_CUTOFF) / (FINISH_WARN_DISTANCE - FINISH_WARN_NEAR_CUTOFF), 0, 1);
+  const alpha = 0.15 + 0.55 * closeness;
+  const pulse = 0.7 + 0.3 * Math.sin(idleT * (3 + closeness * 4));
+  const y = H * 0.09;
+  ctx!.save();
+  ctx!.globalAlpha = alpha;
+  ctx!.font = `800 ${Math.max(13, H * (0.024 + 0.012 * closeness))}px system-ui, sans-serif`;
+  ctx!.textAlign = "center";
+  ctx!.textBaseline = "middle";
+  ctx!.lineWidth = Math.max(2, H * 0.005);
+  ctx!.strokeStyle = "rgba(14,30,50,0.85)";
+  ctx!.shadowColor = `rgba(255,196,90,${pulse})`;
+  ctx!.shadowBlur = 14 * pulse;
+  ctx!.strokeText("FINISH — ALL LANES BLOCKED", W / 2, y);
+  ctx!.fillStyle = "#ffd76a";
+  ctx!.fillText("FINISH — ALL LANES BLOCKED", W / 2, y);
   ctx!.restore();
 }
 
@@ -1098,13 +1225,59 @@ function drawResultFlash(W: number, H: number): void {
   if (state.status !== "won" && state.status !== "lost") return;
   if (resultAt === null) return;
   const t = Math.min(1, (now - resultAt) / RESULT_HOLD_MS);
-  // Kept light (peak 0.16, was 0.32): a full-canvas tint strong enough to
-  // read as "win/loss mood" but not so strong it drowns the road, walls, and
-  // finish cluster in sepia/mauve — the payoff moment is exactly when the
-  // scene most needs to stay legible.
-  const alpha = (1 - t) * 0.16;
-  ctx!.fillStyle = state.status === "won" ? `rgba(255,182,72,${alpha})` : `rgba(255,80,100,${alpha})`;
+  // A full-canvas flat tint (even at a reduced peak alpha) still washes the
+  // pale road/sky toward pink or sepia across the whole frame, including
+  // right behind the result banner and player digit where legibility matters
+  // most. Switched to an edge-only vignette instead: fully clear through the
+  // center third of the canvas, tinted only toward the rim — same "win/loss
+  // mood" cue, without dulling the exact area the eye is looking at.
+  const alpha = (1 - t) * 0.4;
+  const color = state.status === "won" ? "255,182,72" : "255,80,100";
+  const cx = W / 2;
+  const cy = H * 0.55;
+  const grad = ctx!.createRadialGradient(cx, cy, H * 0.22, cx, cy, H * 0.75);
+  grad.addColorStop(0, `rgba(${color},0)`);
+  grad.addColorStop(1, `rgba(${color},${alpha})`);
+  ctx!.fillStyle = grad;
   ctx!.fillRect(0, 0, W, H);
+}
+
+// Explicit win/loss text — up to now the only "did I win or lose" signal was
+// a color/particle shift, which a first-time player has no reason to already
+// know how to read. Reveals just after the impact punch (not on top of it),
+// stays fully legible through most of RESULT_HOLD_MS, and fades out just
+// before the auto-restart — independent of resultFade()/RESULT_FADE_MS,
+// which only governs how fast the *scene clutter* (player digit, obstacles)
+// gets out of the banner's way.
+const RESULT_BANNER_DELAY_MS = 150;
+const RESULT_BANNER_FADE_MS = 220;
+function drawResultBanner(W: number, H: number): void {
+  if (state.status !== "won" && state.status !== "lost") return;
+  if (resultAt === null) return;
+  const elapsed = now - resultAt;
+  const easeIn = clamp((elapsed - RESULT_BANNER_DELAY_MS) / RESULT_BANNER_FADE_MS, 0, 1);
+  const easeOut = clamp((RESULT_HOLD_MS - elapsed) / RESULT_BANNER_FADE_MS, 0, 1);
+  const alpha = Math.min(easeIn, easeOut);
+  if (alpha <= 0.01) return;
+  const label = state.status === "won" ? "CLEARED!" : "CRASHED";
+  const face = state.status === "won" ? "#ffd76a" : "#ff5064";
+  const punch = 1 + 0.3 * (1 - easeIn);
+
+  ctx!.save();
+  ctx!.globalAlpha = alpha;
+  ctx!.translate(W / 2, H * 0.32);
+  ctx!.scale(punch, punch);
+  ctx!.font = `800 ${Math.max(26, W * 0.1)}px system-ui, sans-serif`;
+  ctx!.textAlign = "center";
+  ctx!.textBaseline = "middle";
+  ctx!.lineWidth = Math.max(3, W * 0.012);
+  ctx!.strokeStyle = "rgba(14,30,50,0.85)";
+  ctx!.shadowColor = face;
+  ctx!.shadowBlur = 24;
+  ctx!.strokeText(label, 0, 0);
+  ctx!.fillStyle = face;
+  ctx!.fillText(label, 0, 0);
+  ctx!.restore();
 }
 
 // Shown once the loss punch has had a moment to read, per the brief's
@@ -1151,6 +1324,7 @@ function draw(): void {
   drawRoad(W, H);
   drawSpeedLines(W, H);
   drawFinishCluster(W, H);
+  drawFinishWarning(W, H);
   for (let i = 0; i < OBSTACLES.length; i++) drawObstacle(OBSTACLES[i], i, W, H);
   drawBullets(W, H);
   drawPlayerDigit(W, H);
@@ -1158,9 +1332,15 @@ function draw(): void {
   drawPlayerHud(W);
   drawFireRateHud(W);
 
+  // Same resultFade() used to declutter obstacles/player digit during a
+  // win/loss hold applies here too — a playtest caught a wall-hit's digit
+  // fragments (spawned right as the player crashed into it) still fading out
+  // on their own natural ~0.5-0.85s lifetime well into the CRASHED/CLEARED
+  // banner, floating in the sky and competing with it for attention.
+  const particleFade = resultFade();
   for (const p of particles) {
     ctx!.save();
-    ctx!.globalAlpha = Math.max(0, p.life / p.maxLife);
+    ctx!.globalAlpha = Math.max(0, p.life / p.maxLife) * particleFade;
     if (p.shape === "glyph") {
       ctx!.translate(p.x, p.y);
       ctx!.rotate(p.rot ?? 0);
@@ -1185,6 +1365,7 @@ function draw(): void {
   ctx!.globalAlpha = 1;
 
   drawResultFlash(W, H);
+  drawResultBanner(W, H);
   drawRestartAffordance(W, H);
   ctx!.restore();
 }
@@ -1201,6 +1382,8 @@ function restartNow(): void {
   wallRecoil = new Map();
   gatePulse = new Map();
   wallShatter = new Map();
+  muzzleFlash = null;
+  lastFiredBulletId = -1;
 }
 
 canvas.addEventListener("pointerdown", () => {
@@ -1225,6 +1408,16 @@ function frame(t: number): void {
     state = step(state, dt, desiredLane);
 
     const { x: fx, y: fy } = cannonPos(size.width, size.height);
+
+    if (state.bullets.length > 0) {
+      const maxId = state.bullets.reduce((m, b) => Math.max(m, b.id), -1);
+      if (maxId > lastFiredBulletId) {
+        lastFiredBulletId = maxId;
+        muzzleFlash = 0;
+        spawnBurst(fx, fy, "rgba(255,255,255,0.95)", 5);
+      }
+    }
+
     for (let i = prevResolvedUpTo; i < state.resolvedUpTo; i++) {
       const ob = OBSTACLES[i];
       const isLastResolved = i === state.resolvedUpTo - 1;
@@ -1239,7 +1432,7 @@ function frame(t: number): void {
         if (ob.type === "zone") gatePulse.set(i, 0);
       } else if (isLastResolved && state.status === "lost") {
         spawnBurst(fx, fy, "#ff5064", 24);
-        spawnDigitFragments(fx, fy, state.playerValue, "#ff5064");
+        spawnLossShards(fx, fy, 20);
         playerFx = { kind: "loss", t: 0 };
         triggerShake(0.5);
       } else if (isLastResolved && state.status === "won") {
@@ -1254,7 +1447,7 @@ function frame(t: number): void {
     }
     if (state.status === "lost" && prevStatus === "playing" && state.resolvedUpTo === prevResolvedUpTo) {
       spawnBurst(fx, fy, "#ff5064", 24);
-      spawnDigitFragments(fx, fy, state.playerValue, "#ff5064");
+      spawnLossShards(fx, fy, 20);
       playerFx = { kind: "loss", t: 0 };
       triggerShake(0.5);
     }
@@ -1308,6 +1501,11 @@ function frame(t: number): void {
     const next = t + dt;
     if (next > WALL_SHATTER_DURATION) wallShatter.delete(i);
     else wallShatter.set(i, next);
+  }
+
+  if (muzzleFlash !== null) {
+    const next = muzzleFlash + dt;
+    muzzleFlash = next > 0.18 ? null : next;
   }
 
   for (const [id, fx] of bulletFx) {

@@ -186,7 +186,11 @@ export const SPAWN_AHEAD = 0.03;
 //    legible before a single fork choice exists. From there every wall in
 //    the level lives in the middle lane, and every fork offers a beneficial
 //    zone on one side and a punishing one on the other — the middle lane
-//    itself is always a safe (if unhelped) way through a fork.
+//    itself is always a safe (if unhelped) way through a fork. Which *side*
+//    (lane 0 or lane 2) carries the beneficial zone is deliberately varied
+//    per fork (FORK_BUFF_LANE below) rather than fixed to one lane for the
+//    whole level — a run that learns "lane 2 is always the good one" would
+//    stop reading the gates at all, which defeats the point of them.
 // 2. Mid tier (90, 130, 180) introduces the first ÷2 "weaken" gates as the
 //    trap side of a fork — mechanically identical to a -N gate (floors at
 //    1) but reads and behaves as a division, not a subtraction.
@@ -200,56 +204,53 @@ export const SPAWN_AHEAD = 0.03;
 //    a crash. A weaker (buff-missing) run only clears the lighter lanes, so
 //    reading your own number against the three printed values still matters
 //    even though a fully-optimized run can clear all three.
-export const OBSTACLES: readonly Obstacle[] = [
-  { type: "zone", atUnits: 1.0, lane: 1, kind: "mul", value: 2 },
+interface ForkTier {
+  atUnits: number;
+  wallAtUnits?: number;
+  wallValue?: number;
+  good: { kind: ZoneKind; value: number };
+  bad: { kind: ZoneKind; value: number };
+}
 
-  { type: "zone", atUnits: 1.35, lane: 2, kind: "add", value: 18 },
-  { type: "zone", atUnits: 1.35, lane: 0, kind: "add", value: -8 },
-  { type: "wall", atUnits: 1.7, lane: 1, value: 24 },
-
-  { type: "zone", atUnits: 2.1, lane: 2, kind: "add", value: 14 },
-  { type: "zone", atUnits: 2.1, lane: 0, kind: "add", value: -10 },
-  { type: "wall", atUnits: 2.5, lane: 1, value: 36 },
-
-  { type: "zone", atUnits: 2.9, lane: 2, kind: "add", value: 14 },
-  { type: "zone", atUnits: 2.9, lane: 0, kind: "add", value: -12 },
-  { type: "wall", atUnits: 3.3, lane: 1, value: 48 },
-
-  { type: "zone", atUnits: 3.7, lane: 2, kind: "add", value: 40 },
-  { type: "zone", atUnits: 3.7, lane: 0, kind: "add", value: -20 },
-  { type: "wall", atUnits: 4.1, lane: 1, value: 90 },
-
-  { type: "zone", atUnits: 4.5, lane: 2, kind: "mul", value: 2 },
-  { type: "zone", atUnits: 4.5, lane: 0, kind: "div", value: 2 },
-  { type: "wall", atUnits: 4.9, lane: 1, value: 130 },
-
-  { type: "zone", atUnits: 5.3, lane: 2, kind: "add", value: 30 },
-  { type: "zone", atUnits: 5.3, lane: 0, kind: "add", value: -40 },
-  { type: "wall", atUnits: 5.7, lane: 1, value: 180 },
-
-  { type: "zone", atUnits: 6.1, lane: 2, kind: "add", value: 60 },
-  { type: "zone", atUnits: 6.1, lane: 0, kind: "add", value: -50 },
-  { type: "wall", atUnits: 6.5, lane: 1, value: 260 },
-
-  { type: "zone", atUnits: 6.9, lane: 2, kind: "add", value: 100 },
-  { type: "zone", atUnits: 6.9, lane: 0, kind: "add", value: -60 },
-  { type: "wall", atUnits: 7.3, lane: 1, value: 360 },
-
-  { type: "zone", atUnits: 7.7, lane: 2, kind: "mul", value: 2 },
-  { type: "zone", atUnits: 7.7, lane: 0, kind: "div", value: 2 },
-  { type: "zone", atUnits: 8.1, lane: 2, kind: "rate", value: 0 },
-  { type: "zone", atUnits: 8.1, lane: 0, kind: "add", value: -100 },
-  { type: "wall", atUnits: 8.5, lane: 1, value: 480 },
-
-  { type: "zone", atUnits: 8.9, lane: 2, kind: "add", value: 150 },
-  { type: "zone", atUnits: 8.9, lane: 0, kind: "add", value: -120 },
-  { type: "zone", atUnits: 9.3, lane: 2, kind: "add", value: 50 },
-  { type: "zone", atUnits: 9.3, lane: 0, kind: "div", value: 2 },
-
-  { type: "wall", atUnits: 9.7, lane: 0, value: 600, isFinish: true },
-  { type: "wall", atUnits: 9.7, lane: 1, value: 850, isFinish: true },
-  { type: "wall", atUnits: 9.7, lane: 2, value: 1200, isFinish: true },
+const FORK_TIERS: readonly ForkTier[] = [
+  { atUnits: 1.35, wallAtUnits: 1.7, wallValue: 24, good: { kind: "add", value: 18 }, bad: { kind: "add", value: -8 } },
+  { atUnits: 2.1, wallAtUnits: 2.5, wallValue: 36, good: { kind: "add", value: 14 }, bad: { kind: "add", value: -10 } },
+  { atUnits: 2.9, wallAtUnits: 3.3, wallValue: 48, good: { kind: "add", value: 14 }, bad: { kind: "add", value: -12 } },
+  { atUnits: 3.7, wallAtUnits: 4.1, wallValue: 90, good: { kind: "add", value: 40 }, bad: { kind: "add", value: -20 } },
+  { atUnits: 4.5, wallAtUnits: 4.9, wallValue: 130, good: { kind: "mul", value: 2 }, bad: { kind: "div", value: 2 } },
+  { atUnits: 5.3, wallAtUnits: 5.7, wallValue: 180, good: { kind: "add", value: 30 }, bad: { kind: "add", value: -40 } },
+  { atUnits: 6.1, wallAtUnits: 6.5, wallValue: 260, good: { kind: "add", value: 60 }, bad: { kind: "add", value: -50 } },
+  { atUnits: 6.9, wallAtUnits: 7.3, wallValue: 360, good: { kind: "add", value: 100 }, bad: { kind: "add", value: -60 } },
+  { atUnits: 7.7, good: { kind: "mul", value: 2 }, bad: { kind: "div", value: 2 } },
+  { atUnits: 8.1, wallAtUnits: 8.5, wallValue: 480, good: { kind: "rate", value: 0 }, bad: { kind: "add", value: -100 } },
+  { atUnits: 8.9, good: { kind: "add", value: 150 }, bad: { kind: "add", value: -120 } },
+  { atUnits: 9.3, good: { kind: "add", value: 50 }, bad: { kind: "div", value: 2 } },
 ];
+
+// Which lane (0 or 2) gets the beneficial zone at each fork tier above, in
+// order — hand-picked to mix sides (no more than two forks in a row favour
+// the same lane) rather than randomized at runtime, so the level stays a
+// fixed, testable, reproducible track like the rest of OBSTACLES.
+const FORK_BUFF_LANE: readonly (0 | 2)[] = [2, 0, 2, 0, 0, 2, 0, 2, 2, 0, 0, 2];
+
+function buildLevel(): Obstacle[] {
+  const obstacles: Obstacle[] = [{ type: "zone", atUnits: 1.0, lane: 1, kind: "mul", value: 2 }];
+  FORK_TIERS.forEach((tier, i) => {
+    const goodLane = FORK_BUFF_LANE[i];
+    const badLane = goodLane === 0 ? 2 : 0;
+    obstacles.push({ type: "zone", atUnits: tier.atUnits, lane: goodLane, ...tier.good });
+    obstacles.push({ type: "zone", atUnits: tier.atUnits, lane: badLane, ...tier.bad });
+    if (tier.wallAtUnits !== undefined && tier.wallValue !== undefined) {
+      obstacles.push({ type: "wall", atUnits: tier.wallAtUnits, lane: 1, value: tier.wallValue });
+    }
+  });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 0, value: 600, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 1, value: 850, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 2, value: 1200, isFinish: true });
+  return obstacles;
+}
+
+export const OBSTACLES: readonly Obstacle[] = buildLevel();
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
