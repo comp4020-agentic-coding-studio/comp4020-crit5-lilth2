@@ -149,6 +149,12 @@ let gatePulse = new Map<number, number>();
 // instant vanish.
 let wallShatter = new Map<number, number>();
 
+// Playtest report: the result screen used to auto-restart on its own after
+// this many ms, with no way to tell "did I lose, or did the game just move
+// on?" — Crit 5 requires the game to visibly end, so the run now holds here
+// forever; nothing but an explicit tap/click/keypress (see restartReady())
+// moves past it. Kept only as the timing reference for the flash-in tint and
+// banner fades below, not as an auto-restart deadline.
 const RESULT_HOLD_MS = 1300;
 // Shared by the player digit AND every obstacle draw during a win/loss hold:
 // ramps 1 -> 0 over the first RESULT_FADE_MS of the hold. Obstacles need this
@@ -207,6 +213,11 @@ window.addEventListener("pointerup", () => {
 window.addEventListener(
   "keydown",
   (e) => {
+    if (restartReady()) {
+      e.preventDefault();
+      restartNow();
+      return;
+    }
     if (e.code === "ArrowLeft" || e.code === "KeyA") {
       e.preventDefault();
       requestLane(desiredLane - 1);
@@ -1255,9 +1266,11 @@ function drawResultBanner(W: number, H: number): void {
   if (state.status !== "won" && state.status !== "lost") return;
   if (resultAt === null) return;
   const elapsed = now - resultAt;
+  // No easeOut anymore: the banner used to fade just before the auto-restart
+  // deadline, but the run now holds here until the player acts, so it just
+  // eases in once and stays fully legible indefinitely.
   const easeIn = clamp((elapsed - RESULT_BANNER_DELAY_MS) / RESULT_BANNER_FADE_MS, 0, 1);
-  const easeOut = clamp((RESULT_HOLD_MS - elapsed) / RESULT_BANNER_FADE_MS, 0, 1);
-  const alpha = Math.min(easeIn, easeOut);
+  const alpha = easeIn;
   if (alpha <= 0.01) return;
   const label = state.status === "won" ? "CLEARED!" : "CRASHED";
   const face = state.status === "won" ? "#ffd76a" : "#ff5064";
@@ -1280,12 +1293,17 @@ function drawResultBanner(W: number, H: number): void {
   ctx!.restore();
 }
 
-// Shown once the loss punch has had a moment to read, per the brief's
-// "concise failure state and a restart button" — the existing RESULT_HOLD_MS
-// auto-reset stays as a fallback if nobody taps.
+// Shown once the win/loss punch has had a moment to read, per the brief's
+// "concise end state and a restart button" — this is now the ONLY way back
+// into a fresh run, for both outcomes, since the result screen no longer
+// auto-advances on its own.
 const RESTART_SHOW_DELAY_MS = 300;
 function restartReady(): boolean {
-  return state.status === "lost" && resultAt !== null && now - resultAt >= RESTART_SHOW_DELAY_MS;
+  return (
+    (state.status === "lost" || state.status === "won") &&
+    resultAt !== null &&
+    now - resultAt >= RESTART_SHOW_DELAY_MS
+  );
 }
 function drawRestartAffordance(W: number, H: number): void {
   if (!restartReady()) return;
@@ -1400,7 +1418,6 @@ function frame(t: number): void {
 
   if (state.status === "won" || state.status === "lost") {
     if (resultAt === null) resultAt = t;
-    if (t - resultAt > RESULT_HOLD_MS) restartNow();
   } else {
     const prevResolvedUpTo = state.resolvedUpTo;
     const prevStatus = state.status;

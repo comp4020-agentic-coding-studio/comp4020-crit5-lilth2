@@ -196,19 +196,20 @@ export const SPAWN_AHEAD = 0.03;
 //    per fork (FORK_BUFF_LANE below) rather than fixed to one lane for the
 //    whole level — a run that learns "lane 2 is always the good one" would
 //    stop reading the gates at all, which defeats the point of them.
-// 2. Mid tier (90, 130, 180) introduces the first ÷2 "weaken" gates as the
+// 2. Mid tier (90, 130, 190) introduces the first ÷2 "weaken" gates as the
 //    trap side of a fork — mechanically identical to a -N gate (floors at
 //    1) but reads and behaves as a division, not a subtraction.
-// 3. Late tier (260, 360, 480) raises the stakes further: two more ÷2 traps
+// 3. Late tier (260, 340) raises the stakes further: two more ÷2 traps
 //    guard the segment, alongside a RATE+ gate for players leaning on bullet
 //    chip rather than raw value.
 // 4. Finish approach feeds one last pair of forks (including a final ÷2
 //    trap) into the finish gauntlet: three walls side by side, one per lane
-//    (380 / 520 / 750). Whichever lane you're in when you arrive is the
+//    (380 / 560 / 850). Whichever lane you're in when you arrive is the
 //    number you must beat — smash through it and you win; anything else is
-//    a crash. A weaker (buff-missing) run only clears the lighter lanes, so
-//    reading your own number against the three printed values still matters
-//    even though a fully-optimized run can clear all three.
+//    a crash. A weaker (buff-missing) run only clears the lighter lanes, and
+//    even a fully-optimized clean run only clears the hardest lane with a
+//    modest margin, so reading your own number against the three printed
+//    values still matters throughout, not just early on.
 interface ForkTier {
   atUnits: number;
   wallAtUnits?: number;
@@ -221,17 +222,25 @@ interface ForkTier {
 // now floor no worse than a rough halving even at the harshest late tiers),
 // after real-playtest reports that missing even one or two forks made every
 // later wall unbeatable regardless of lane choice — see PROCESS.md.
+// Round seven: that fix over-corrected — a clean or near-clean run's
+// compounding buffs left mid/late walls and the finish gauntlet trivial (a
+// clean run ended at playerValue ~956 against a 620 hardest finish wall).
+// Raised the mid/late tier walls (60-230 -> 90-340) and the finish gauntlet
+// (300/420/620 -> 380/560/850) so a strong run still wins but without the
+// same overkill margin, while leaving the early tiers (14/18/24/40) and the
+// bad-zone penalties/fire-rate untouched, since simulation showed those are
+// what made an early-fork miss survivable — see PROCESS.md.
 const FORK_TIERS: readonly ForkTier[] = [
   { atUnits: 1.35, wallAtUnits: 1.7, wallValue: 14, good: { kind: "add", value: 18 }, bad: { kind: "add", value: -3 } },
   { atUnits: 2.1, wallAtUnits: 2.5, wallValue: 18, good: { kind: "add", value: 14 }, bad: { kind: "add", value: -4 } },
   { atUnits: 2.9, wallAtUnits: 3.3, wallValue: 24, good: { kind: "add", value: 14 }, bad: { kind: "add", value: -5 } },
   { atUnits: 3.7, wallAtUnits: 4.1, wallValue: 40, good: { kind: "add", value: 40 }, bad: { kind: "add", value: -8 } },
-  { atUnits: 4.5, wallAtUnits: 4.9, wallValue: 60, good: { kind: "mul", value: 2 }, bad: { kind: "div", value: 2 } },
-  { atUnits: 5.3, wallAtUnits: 5.7, wallValue: 85, good: { kind: "add", value: 30 }, bad: { kind: "add", value: -15 } },
-  { atUnits: 6.1, wallAtUnits: 6.5, wallValue: 120, good: { kind: "add", value: 60 }, bad: { kind: "add", value: -20 } },
-  { atUnits: 6.9, wallAtUnits: 7.3, wallValue: 165, good: { kind: "add", value: 100 }, bad: { kind: "add", value: -25 } },
+  { atUnits: 4.5, wallAtUnits: 4.9, wallValue: 90, good: { kind: "mul", value: 2 }, bad: { kind: "div", value: 2 } },
+  { atUnits: 5.3, wallAtUnits: 5.7, wallValue: 130, good: { kind: "add", value: 30 }, bad: { kind: "add", value: -15 } },
+  { atUnits: 6.1, wallAtUnits: 6.5, wallValue: 190, good: { kind: "add", value: 60 }, bad: { kind: "add", value: -20 } },
+  { atUnits: 6.9, wallAtUnits: 7.3, wallValue: 260, good: { kind: "add", value: 100 }, bad: { kind: "add", value: -25 } },
   { atUnits: 7.7, good: { kind: "mul", value: 2 }, bad: { kind: "div", value: 2 } },
-  { atUnits: 8.1, wallAtUnits: 8.5, wallValue: 230, good: { kind: "rate", value: 0 }, bad: { kind: "add", value: -40 } },
+  { atUnits: 8.1, wallAtUnits: 8.5, wallValue: 340, good: { kind: "rate", value: 0 }, bad: { kind: "add", value: -40 } },
   { atUnits: 8.9, good: { kind: "add", value: 150 }, bad: { kind: "add", value: -50 } },
   { atUnits: 9.3, good: { kind: "add", value: 50 }, bad: { kind: "div", value: 2 } },
 ];
@@ -253,9 +262,9 @@ function buildLevel(): Obstacle[] {
       obstacles.push({ type: "wall", atUnits: tier.wallAtUnits, lane: 1, value: tier.wallValue });
     }
   });
-  obstacles.push({ type: "wall", atUnits: 9.7, lane: 0, value: 300, isFinish: true });
-  obstacles.push({ type: "wall", atUnits: 9.7, lane: 1, value: 420, isFinish: true });
-  obstacles.push({ type: "wall", atUnits: 9.7, lane: 2, value: 620, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 0, value: 380, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 1, value: 560, isFinish: true });
+  obstacles.push({ type: "wall", atUnits: 9.7, lane: 2, value: 850, isFinish: true });
   return obstacles;
 }
 

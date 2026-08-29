@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BULLET_FIRE_INTERVAL,
+  BULLET_MAX_REACH,
   HIT_HALF,
   LANE_ANIM_DURATION,
   MIN_FIRE_INTERVAL,
@@ -318,6 +319,60 @@ describe("step(): a freshly-fired bullet always survives its own spawn frame", (
   });
 });
 
+// Regression coverage for the "站在中间车道时子弹看起来没发射/射程不够" playtest
+// report: verifies, at the level of pure functions and a real step() run,
+// that a middle-lane (lane 1) bullet is created correctly, reliably reaches
+// as far as the level's walls, and chips exactly the hp its value says it
+// should — see PROCESS.md for the corresponding playtest note.
+describe("middle-lane bullet spawn/reach/collision (playtest regression coverage)", () => {
+  it("spawnBullet always puts the bullet in the requesting lane at the player's exact current value", () => {
+    const bullet = spawnBullet(8, 1, 2, 0, 0);
+    expect(bullet.lane).toBe(1);
+    expect(bullet.value).toBe(8);
+  });
+
+  it("BULLET_MAX_REACH comfortably covers the distance from the start to the first visible wall", () => {
+    const firstWall = OBSTACLES.find((ob) => ob.type === "wall");
+    expect(firstWall).toBeDefined();
+    expect(BULLET_MAX_REACH).toBeGreaterThan(firstWall!.atUnits);
+    // Not just "greater than" by a hair — it covers the whole track, so a
+    // bullet fired anywhere on the run can still reach anything ahead of it.
+    expect(BULLET_MAX_REACH).toBeGreaterThanOrEqual(TRACK_LENGTH);
+  });
+
+  it("a lane-1 bullet reaching a lane-1 wall reduces wallHp by exactly the bullet's value", () => {
+    // Start just past the free ×2 gate (atUnits 1.0) and the first wall
+    // (atUnits 1.7), so the only lane-1 obstacle left ahead is the second
+    // wall (atUnits 2.5, value 18) — no zone in between to change the
+    // bullet's value in flight, so it hits carrying exactly playerValue.
+    const startX = 1.8;
+    const resolvedUpTo = OBSTACLES.filter((ob) => ob.atUnits <= startX).length;
+    const playerValue = 5;
+    let state: GameState = {
+      status: "playing",
+      worldX: startX,
+      playerValue,
+      lane: 1,
+      laneX: 1,
+      laneFrom: 1,
+      laneAnimT: LANE_ANIM_DURATION,
+      resolvedUpTo,
+      bullets: [],
+      bulletTimer: 0,
+      fireRate: BULLET_FIRE_INTERVAL,
+      nextBulletId: 0,
+      wallHp: OBSTACLES.map((ob) => (ob.type === "wall" ? ob.value : 0)),
+    };
+    const wallIndex = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.atUnits === 2.5);
+    const wall = OBSTACLES[wallIndex] as Wall;
+    const dt = 1 / 60;
+    for (let i = 0; i < 200 && state.wallHp[wallIndex] === wall.value; i++) {
+      state = step(state, dt, 1);
+    }
+    expect(state.wallHp[wallIndex]).toBe(wall.value - playerValue);
+  });
+});
+
 describe("checkEndCondition", () => {
   it("a player number at or below zero can never beat another wall, so the round is already lost", () => {
     expect(checkEndCondition(stateInLane(1, 0))).toBe("lost");
@@ -381,7 +436,7 @@ describe("the hand-authored level, driven end to end through the real level data
     };
   }
 
-  it("wins by collecting every visible bonus, dodging every danger zone, and beating the middle finish wall (420)", () => {
+  it("wins by collecting every visible bonus, dodging every danger zone, and beating the middle finish wall (560)", () => {
     const final = drivePath(zigzag(FORK_VISITS, 1));
     expect(final.status).toBe("won");
   });
