@@ -595,10 +595,24 @@ clean —
 carries all four fixes above. Still open from this round's report: whether walls should occupy more
 than lane 1 (flagged but not changed — it conflicts with the fix from an
 earlier round that specifically made "an unwalled lane is always safe" the
-rule, so this needs a decision rather than a silent revert), and further
-amplifying the existing bullet/zone visual feedback (muzzle flash, wall-hit
-damage numbers, shatter effects already exist; whether they need to be bigger
-or brighter is a separate, smaller pass).
+rule, so this needs a decision rather than a silent revert).
+
+**Bullets crossing a zone got the same floating callout wall hits already
+had.** The user's remaining ask was that a bullet growing on `+`, flashing
+purple on `×2`, or shrinking/reddening on `-`/`÷` needed to read as clearly as
+the wall-damage numbers already do. Auditing `main.ts` found the wall-hit and
+player-zone-cross paths both spawn a `spawnDigitFragments` callout (the exact
+"+30"/"-15"-style scattering text), but the bullet-zone-cross path only had
+`bulletFx`'s ring flash — a real gap, not just a legibility question this
+time. Fixed by spawning the same `labelFor`/`modifierColor`-driven digit
+callout at the bullet's own screen position the instant its `resolvedUpTo`
+crosses a zone, alongside the existing ring and badge-tint. Confirmed via a
+local playtest screenshot mid-run: the callouts (`×2`, `÷2`, `+40`, `-8`, `-5`)
+scatter and fade exactly like the existing wall-hit fragments, and the
+retuned wall sequence (24 → 40 → 90) renders in the expected order. No
+`game.ts` logic changed — this is rendering-only, so all 66 tests are
+unaffected —
+[`ad34e95`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/ad34e95).
 
 ## Directing the AI collaboration
 
