@@ -1548,6 +1548,19 @@ function frame(t: number): void {
         bulletFx.set(b.id, { kind, t: 0 });
         bulletLastKind.set(b.id, kind);
         gatePulse.set(i, 0);
+        // Playtest report: the ring flash alone read as too subtle to tell
+        // "did that gate just do something to my bullet?" at a glance — the
+        // same floating digit-fragment callout the wall hits already use
+        // (labelFor/modifierColor: "+30" green, "×2" purple, "÷2" orange,
+        // "-15" red) now fires at the bullet's own position too, not just the
+        // player's.
+        const distanceAhead = ob.atUnits - state.worldX;
+        if (visibleAt(distanceAhead)) {
+          const d = depthOf(distanceAhead);
+          const bx = laneCenterX(b.lane, d, size.width);
+          const by = yAt(d, size.height);
+          spawnDigitFragments(bx, by, labelFor(ob), modifierColor(ob.kind, ob.value).fill);
+        }
       }
       prevBulletResolvedUpTo.set(b.id, b.resolvedUpTo);
     }
