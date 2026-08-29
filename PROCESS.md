@@ -614,6 +614,72 @@ retuned wall sequence (24 → 40 → 90) renders in the expected order. No
 unaffected —
 [`ad34e95`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/ad34e95).
 
+**Round eight: a start-beat, HUD hierarchy, a real progress bar, and walls on
+every lane.** Five more playtest reports arrived in one pass.
+
+*"The run starts scrolling before I'm ready."* World/bullets now hold still
+(idle bob/tilt keeps animating, nothing scores) until either the player's
+first input arrives or a 0.9s fallback elapses — the fallback exists so a
+player who hasn't found the controls yet isn't stuck on a frozen screen
+indefinitely. Implemented as a `started` flag gating `step()` inside
+`frame()`, set by the same pointerdown/keydown handlers that already drive
+lane changes, reset on restart.
+
+*"Four competing numbers — top HUD, player, wall, bullet — no clear
+hierarchy."* The top HUD (`drawPlayerHud`) used to render at near-player-digit
+size with a heavy glow, directly duplicating the on-road player digit right
+above it. Shrunk it to a small, low-glow status readout so the on-road digit
+is unambiguously the largest "this is you" element, with the wall label next
+and the bullet badge smallest (that size ordering already existed in the font
+sizes; the top HUD was the one competing). The bullet's carried digit also
+had no motion cue of its own (only the arrow shape trailed) — it now leaves
+fading ghost copies of its own badge, so it visibly reads as a moving element
+distinct from the static wall/player digits.
+
+*"No sense of progress — feels like an infinite runner by mid-run."* The
+progress bar already existed but was a 4px, low-contrast sliver easy to miss.
+Thickened it, raised its contrast, and added a tick mark at every wall's
+position (derived straight from `OBSTACLES`, no hardcoded list to drift out of
+sync) — reads as a visible sequence of gates ahead, not a featureless track.
+No text/labels added, per the explicit "no tutorial needed" instruction.
+
+*"Home link still looks like stray UI."* Re-checked against the fix already
+shipped last round (`.sr-only` on the `<nav>`, confirmed live in production at
+1x1px) — still in place, unchanged, nothing regressed. Most likely a stale
+cached view of the site rather than something to fix again.
+
+*"Walls should cover multiple lanes, and raise the numbers further."*
+Previously flagged as an open decision (round seven): ducking into the
+beneficial lane just long enough to grab its zone, then always returning to
+the middle lane before the wall, made the middle lane a completely free dodge
+from every wall in the level. Every wall now spans all three lanes at the
+same position — softer in the beneficial lane, harsher in the punishing one,
+the same pattern the finish gauntlet already used — via two new optional
+`wallGoodValue`/`wallBadValue` fields per `FORK_TIERS` entry. The middle
+lane's own value is untouched, so the fairness fix from round six (an early
+fork miss must stay recoverable) needed no re-verification for that specific
+path — it never visits the new side-lane walls at all. What *did* need
+verification: a scratch harness (`spec/_tmp_sim.test.ts`, deleted after use,
+mirroring the round six/seven methodology) drove a "commit to the beneficial
+lane through its own wall, every time" path and a "commit to the punishing
+lane" path against the real `OBSTACLES` data. Findings: the beneficial-lane
+commit still wins, clearing its softest late wall (215 at unit 8.5) with a
+comfortable but not trivial margin (playerValue 716) and the finish gauntlet's
+lane-0 wall (440) by a tight margin thanks to bullet pre-chip — not the
+overkill margin round seven had to correct; the punishing-lane commit loses at
+the very first wall (playerValue 5 vs. 21 needed), which is the intended
+consequence of choosing every debuff, not a fairness bug. Alongside that, the
+mid/late middle-lane walls (5th-8th and 10th tiers) and the finish gauntlet
+were raised again (~15%: 90→105, 130→150, 190→220, 260→300, 340→390,
+380/560/850→440/650/980), leaving the early tiers (14/18/24/40) untouched for
+the same reason round seven left them untouched. All 66 existing tests still
+pass unmodified — the "reasonable run" test driver ducks back to the middle
+lane before every wall exactly like it always did, so it's provably unaffected
+by the middle lane being left alone.
+
+All five fixes, `pnpm check`/`pnpm check:evidence` clean —
+[`1933267`](https://github.com/comp4020-agentic-coding-studio/comp4020-crit5-lilth2/commit/1933267).
+
 ## Directing the AI collaboration
 
 I set the constraints this week (the player's identity must be the number
