@@ -270,6 +270,43 @@ describe("step(): bullets chip walls ahead of the player", () => {
     expect(state.wallHp[wallIndex]).toBeLessThan(14);
   });
 
+  it("a bullet flies straight through an already-destroyed wall to keep chipping the next wall in the same lane", () => {
+    // Regression for "碎墙后子弹不能继续往后发射，必须等到下一个增益减益效果通过后才能到达
+    // 下一个墙": once a wall's live hp hit 0, the bullet that finished it off was
+    // still marked "spent" exactly as if the wall were still standing — so a
+    // bullet already in flight when a wall it passes through is destroyed died
+    // at that same spot instead of continuing on to a later wall in its lane.
+    // Isolated here as a single frame: one pre-existing bullet sits just short
+    // of a wall (1.7) that's already been chipped to 0 by earlier bullets, the
+    // player hasn't physically reached it yet, and dt is large enough that the
+    // bullet's flight this frame reaches all the way to the next wall (2.5) in
+    // the same lane.
+    const wall1Index = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.lane === 1 && ob.atUnits === 1.7);
+    const wall2Index = OBSTACLES.findIndex((ob) => ob.type === "wall" && ob.lane === 1 && ob.atUnits === 2.5);
+    const wall2 = OBSTACLES[wall2Index] as Wall;
+    const playerResolvedUpTo = OBSTACLES.filter((ob) => ob.atUnits < 1.7).length;
+    const wallHp = OBSTACLES.map((ob, i) => (ob.type === "wall" ? (i === wall1Index ? 0 : ob.value) : 0));
+    const bulletValue = 10;
+    let state: GameState = {
+      status: "playing",
+      worldX: 1.6,
+      playerValue: 999,
+      lane: 1,
+      laneX: 1,
+      laneFrom: 1,
+      laneAnimT: LANE_ANIM_DURATION,
+      resolvedUpTo: playerResolvedUpTo,
+      bullets: [{ id: 0, lane: 1, value: bulletValue, spawnValue: bulletValue, atUnits: 1.69, resolvedUpTo: wall1Index }],
+      bulletTimer: 999,
+      fireRate: BULLET_FIRE_INTERVAL,
+      nextBulletId: 1,
+      wallHp,
+    };
+    state = step(state, 0.5, 1);
+    expect(state.wallHp[wall1Index]).toBe(0);
+    expect(state.wallHp[wall2Index]).toBe(wall2.value - bulletValue);
+  });
+
   it("a wall chipped down to 0 (the effective obstacle step() builds from wallHp) lets even a very weak player through", () => {
     // This is the exact mechanism step() relies on: canBreakWall/resolveCollision
     // never change, they're just handed a wall whose value reflects live,
@@ -446,12 +483,16 @@ describe("the hand-authored level, driven end to end through the real level data
   it("loses (not instantly, and well short of the mid tier) by never leaving the middle lane and skipping every bonus", () => {
     const final = drivePath((state) => 1);
     expect(final.status).toBe("lost");
-    // Clears the first three walls (14/18/24) via the free ×2 gate plus
-    // bullet chip alone — this isn't a first-wall instant-death build — but
-    // dies in the teaching tier, right at the wall (40 at 4.1) that finally
+    // Clears the first four walls (14/18/24/40), plus chips the 105 wall
+    // partway down, via the free ×2 gate plus bullet chip alone —
+    // this isn't a first-wall instant-death build. Fixed alongside "a bullet
+    // flies straight through an already-destroyed wall...": bullets no longer
+    // die uselessly at a wall already destroyed by an earlier bullet, so
+    // passive chip now reaches much further down the lane than it used to —
+    // dies in the teaching tier, at the wall (105 at 4.9) that finally
     // outpaces what passive chip alone can keep up with.
-    expect(final.worldX).toBeGreaterThan(1.7);
-    expect(final.worldX).toBeLessThan(4.2);
+    expect(final.worldX).toBeGreaterThan(4.2);
+    expect(final.worldX).toBeLessThan(5.7);
   });
 
   it("a run that misses one or two later buffs (a realistic first attempt) still wins", () => {

@@ -591,8 +591,18 @@ export function step(state: GameState, dt: number, laneInput: Lane | null): Game
             bullet = { ...bullet, value: applyModifierToBullet(bullet.value, ob) };
           }
         } else if (ob.type === "wall") {
-          wallHp[bullet.resolvedUpTo] = resolveWallHit(wallHp[bullet.resolvedUpTo], bullet.value);
-          spent = true;
+          // A wall already chipped down to 0 by an earlier bullet is inert —
+          // let this bullet fly straight through it instead of being consumed
+          // by a carcass. Without this check, the first wall a bullet destroys
+          // in a given lane permanently eats every bullet fired afterward at
+          // that exact spot, so no bullet could ever pre-chip a later wall (or
+          // even reach a later zone) in that lane for the rest of the run —
+          // reported as "bullets stop working until I pass the next gate
+          // myself."
+          if (!isWallDestroyed(wallHp[bullet.resolvedUpTo])) {
+            wallHp[bullet.resolvedUpTo] = resolveWallHit(wallHp[bullet.resolvedUpTo], bullet.value);
+            spent = true;
+          }
         }
       }
       bullet = { ...bullet, resolvedUpTo: bullet.resolvedUpTo + 1 };
